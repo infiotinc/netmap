@@ -63,6 +63,9 @@
 #if defined(CONFIG_NETMAP_NULL)
 #define WITH_NMNULL
 #endif
+#if defined(CONFIG_NETMAP_DSA)
+#define WITH_DSA
+#endif
 
 #elif defined (_WIN32)
 #define WITH_VALE	// comment out to disable VALE support

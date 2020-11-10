@@ -15,6 +15,7 @@ remoteobjs-$(CONFIG_NETMAP_PIPE)    += netmap_pipe.o
 remoteobjs-$(CONFIG_NETMAP_MONITOR) += netmap_monitor.o
 remoteobjs-$(CONFIG_NETMAP_GENERIC) += netmap_generic.o
 remoteobjs-$(CONFIG_NETMAP_NULL)    += netmap_null.o
+remoteobjs-$(CONFIG_NETMAP_DSA)     += netmap_dsa.o
 
 define remote_template
 $$(obj)/$(1): %.o: $$(SRCDIR)/../sys/dev/netmap/$(2) FORCE
