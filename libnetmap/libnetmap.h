@@ -733,4 +733,22 @@ void nmctx_lock(struct nmctx *);
 /* nmctx_unlock - unlock the list of nmem_d */
 void nmctx_unlock(struct nmctx *);
 
+#ifdef CONFIG_NETMAP_DSA
+
+int nmdsa_init(void);
+void nmdsa_config_print(void);
+
+#else
+
+static inline int nmdsa_init(void)
+{
+	struct nmctx *ctx = nmctx_get();
+	nmctx_ferror(ctx, "Error DSA support is disabled");
+	return -1;
+}
+
+static inline void nmdsa_config_print(void) { }
+
+#endif
+
 #endif /* LIBNETMAP_H_ */

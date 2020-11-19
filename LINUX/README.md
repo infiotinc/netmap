@@ -73,6 +73,40 @@ used to access NICs without native netmap support (at reduced performance).
 driver).
 * **sink**: a dummy drop-everything device with native netmap support.
 It can emulate a link with configurable packet rate.
+* **dsa**: support for Distributed Switch Architecture (DSA).
+
+### DSA subsystem
+
+Distributed Switch Architecture (DSA) is a subsystem supported by Linux kernel
+and it's description can be found in https://www.kernel.org/doc/Documentation/networking/dsa/dsa.txt.
+
+DSA ports configuration is provided to netmap application in a dsa.txt configuration file.
+Below is an example of dsa.txt configurtion file:
+
+```
+#Tag type: edsa or dsa
+tag-type edsa
+
+#Profile name   Slave port name   Slave port number   Bind mode   Cpu port name  Vlan id  Vlan prio
+wan_net                wan		1		  hw	      eth1
+wan_net_vlan           wan              1                 hw          eth1         1073       7
+wan_host               wan              1                 host        eth1
+
+lan0_net               lan0		2		  hw	      eth1
+lan0_net_vlan          lan0             2                 hw          eth1         4036       1
+lan0_host              lan0             2                 host        eth1
+
+lan1_net	       lan1		3		  hw	      eth1
+lan1_net_vlan          lan1             3                 hw          eth1         3500       4
+lan1_host              lan1             3                 host        eth1
+```
+
+In case of DSA subsystem profile name is passed to a netmap application instead of interface name because
+configuration file can include multiple configurations for a selected interface name as in the above
+example. Slave port name and number are DSA slave port and its number and can be found in a device tree.
+Bind mode determines whether interface will bind to host rings (host), network rings (hw) or both (all).
+Cpu port is a DSA cpu port name and currently only single cpu port is supported. Vlan identifier and vlan
+priority are optionall and when confiugred will be applied to egress traffic on selected interface.
 
 ### NIC drivers
 
