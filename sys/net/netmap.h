@@ -157,6 +157,12 @@
  *   adapter.
  */
 
+enum {
+	NETMAP_SUB_TYPE	= 1,
+	VALE_SUB_TYPE,
+	DSA_SUB_TYPE,
+};
+
 /*
  * struct netmap_slot is a buffer descriptor
  */
@@ -607,6 +613,19 @@ struct nmreq_register {
 	uint32_t	nr_mode;	/* specify NR_REG_* modes */
 	uint32_t	nr_extra_bufs;	/* number of requested extra buffers */
 
+#ifdef CONFIG_NETMAP_DSA
+	char cpu_port_name[NETMAP_REQ_IFNAMSIZ];	/* cpu port name */
+#define DSA_MAX_PORTS	8
+	uint16_t	port_num;	/* port number in a switch */
+#define TAG_DSA_TYPE	1
+#define TAG_EDSA_TYPE	2
+	uint16_t	tag_type;	/* tag type: DSA or EDSA */
+#define MAX_VLAN_ID 4096
+	uint16_t	vlan_id;	/* vlan identifier */
+#define MAX_VLAN_PRIO 8
+	uint8_t		vlan_prio;	/* vlan priority */
+	uint8_t		tagged;		/* is port vlan tagged */
+#endif
 	uint64_t	nr_flags;	/* additional flags (see below) */
 /* monitors use nr_ringid and nr_mode to select the rings to monitor */
 #define NR_MONITOR_TX	0x100

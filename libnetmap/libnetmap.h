@@ -489,6 +489,7 @@ void nmreq_header_init(struct nmreq_header *hdr, uint16_t reqtype, void *body);
 
 /* nmreq_header_decode - initialize an nmreq_header
  * @ppspec:	(in/out) pointer to a pointer to the portspec
+ * @subsys_type:(out) pointer to the subsystem type
  * @hdr:	pointer to the nmreq_header to be initialized
  * @ctx:	pointer to the nmctx to use (for errors)
  *
@@ -500,10 +501,11 @@ void nmreq_header_init(struct nmreq_header *hdr, uint16_t reqtype, void *body);
  * EINVAL, @pifname is unchanged, *@hdr is also unchanged, and an error message
  * is sent through @ctx->error().
  */
-int nmreq_header_decode(const char **ppspec, struct nmreq_header *hdr,
-		struct nmctx *ctx);
+int nmreq_header_decode(const char **ppspec, uint16_t *subsys_type,
+		struct nmreq_header *hdr, struct nmctx *ctx);
 
-/* nmreq_regiter_decode - initialize an nmreq_register
+/* nmreq_register_decode - initialize an nmreq_register for netmap and vale
+ * 			  subsystems
  * @pmode:	(in/out) pointer to a pointer to an opening mode
  * @reg:	pointer to the nmreq_register to be initialized
  * @ctx:	pointer to the nmctx to use (for errors)
@@ -523,6 +525,24 @@ int nmreq_header_decode(const char **ppspec, struct nmreq_header *hdr,
  * is sent through @ctx->error().
  */
 int nmreq_register_decode(const char **pmode, struct nmreq_register *reg,
+		struct nmctx *ctx);
+
+/* nmreq_register_decode_dsa - initialize an nmreq_register for dsa subsystem
+ *
+ * @pmode:	(in/out) pointer to a pointer to an opening mode
+ * @reg:	pointer to the nmreq_register to be initialized
+ * @ctx:	pointer to the nmctx to use (for errors)
+ *
+ * This function fills the nr_mode, cpu_pirt_name, port_num, and tag_type
+ * fields of the structure pointed by @reg, according to the opening mode
+ * specified by *@pmode. The other fields of *@reg are unchanged.  The @pmode
+ * is updated to point at the first char past the opening mode.
+ *
+ * Returns 0 on success.  In case of error, -1 is returned with errno set to
+ * EINVAL, @pmode is unchanged, *@reg is also unchanged, and an error message
+ * is sent through @ctx->error().
+ */
+int nmreq_register_decode_dsa(const char **pmode, struct nmreq_register *reg,
 		struct nmctx *ctx);
 
 /* nmreq_options_decode - parse the "options" part of the portspec

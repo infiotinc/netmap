@@ -76,6 +76,7 @@ nmreq_push_option(struct nmreq_header *h, struct nmreq_option *o)
 
 struct nmreq_prefix {
 	const char *prefix;		/* the constant part of the prefix */
+	uint16_t    subsys_type;	/* subsystem type: NETMAP, VALE, DSA */
 	size_t	    len;		/* its strlen() */
 	uint32_t    flags;
 #define	NR_P_ID		(1U << 0)	/* whether an identifier is needed */
@@ -83,11 +84,12 @@ struct nmreq_prefix {
 #define NR_P_EMPTYID	(1U << 2)	/* whether an empty identifier is allowed */
 };
 
-#define declprefix(prefix, flags)	{ (prefix), (sizeof(prefix) - 1), (flags) }
+#define declprefix(prefix, subsys_type, flags)	{ (prefix), (subsys_type), (sizeof(prefix) - 1), (flags) }
 
 static struct nmreq_prefix nmreq_prefixes[] = {
-	declprefix("netmap", NR_P_SKIP),
-	declprefix(NM_BDG_NAME,	NR_P_ID|NR_P_EMPTYID),
+	declprefix("netmap", NETMAP_SUB_TYPE, NR_P_SKIP),
+	declprefix(NM_BDG_NAME,	VALE_SUB_TYPE, NR_P_ID|NR_P_EMPTYID),
+	declprefix("dsa", DSA_SUB_TYPE, 0),
 	{ NULL } /* terminate the list */
 };
 
@@ -101,7 +103,8 @@ nmreq_header_init(struct nmreq_header *h, uint16_t reqtype, void *body)
 }
 
 int
-nmreq_header_decode(const char **pifname, struct nmreq_header *h, struct nmctx *ctx)
+nmreq_header_decode(const char **pifname, uint16_t *subsys_type,
+		struct nmreq_header *h, struct nmctx *ctx)
 {
 	const char *scan = NULL;
 	const char *vpname = NULL;
@@ -119,6 +122,9 @@ nmreq_header_decode(const char **pifname, struct nmreq_header *h, struct nmctx *
 		nmctx_ferror(ctx, "%s: invalid request, prefix unknown or missing", *pifname);
 		goto fail;
 	}
+
+	if (subsys_type)
+		*subsys_type = p->subsys_type;
 	scan += p->len;
 
 	vpname = index(scan, ':');
@@ -149,7 +155,7 @@ nmreq_header_decode(const char **pifname, struct nmreq_header *h, struct nmctx *
 	scan = vpname;
 
 	/* scan for a separator */
-	for (; *scan && !index("-*^/@", *scan); scan++)
+	for (; *scan && !index("-*^/@#%+<>", *scan); scan++)
 		;
 
 	/* search for possible pipe indicators */
@@ -189,7 +195,6 @@ nmreq_header_decode(const char **pifname, struct nmreq_header *h, struct nmctx *
 	ED("name %s", h->nr_name);
 
 	*pifname = scan;
-
 	return 0;
 fail:
 	errno = EINVAL;
@@ -223,7 +228,7 @@ nmreq_get_mem_id(const char **pifname, struct nmctx *ctx)
 		goto fail;
 	}
 	nmreq_header_init(&gh, NETMAP_REQ_PORT_INFO_GET, &gb);
-	if (nmreq_header_decode(&ifname, &gh, ctx) < 0) {
+	if (nmreq_header_decode(&ifname, NULL, &gh, ctx) < 0) {
 		goto fail;
 	}
 	memset(&gb, 0, sizeof(gb));
@@ -243,9 +248,8 @@ fail:
 	return -1;
 }
 
-
-int
-nmreq_register_decode(const char **pifname, struct nmreq_register *r, struct nmctx *ctx)
+static int nmreq_register_decode_netmap_vale(const char **pifname,
+		struct nmreq_register *r, struct nmctx *ctx)
 {
 	enum { P_START, P_RNGSFXOK, P_GETNUM, P_FLAGS, P_FLAGSOK, P_MEMID, P_ONESW } p_state;
 	long num;
@@ -408,6 +412,192 @@ fail:
 	return -1;
 }
 
+#ifdef CONFIG_NETMAP_DSA
+
+int nmreq_register_decode_dsa(const char **pifname, struct nmreq_register *reg,
+		struct nmctx *ctx)
+{
+	enum { P_START, P_GETNUM_PORT,  P_GETNUM_TAG, P_GETSTR_CPU, P_SET_MODE,
+	       P_GETNUM_VLAN_ID, P_GETNUM_VLAN_PRIO, P_STATE_MAX } p_state;
+	uint8_t state_arr[P_STATE_MAX] = { 0 };
+	const char *scan = *pifname, *tmp;
+	uint16_t len;
+	long val;
+
+	/* fill the request */
+
+	p_state = P_START;
+	reg->tag_type = TAG_DSA_TYPE;
+	/* bind to hardware rings by default */
+	reg->nr_mode = NR_REG_ALL_NIC;
+	reg->vlan_prio = 0;
+	reg->port_num = 0;
+	reg->vlan_id = 0;
+	reg->tagged = 0;
+	len = 0;
+	while (*scan) {
+		switch (p_state) {
+		case P_START:
+			switch (*scan) {
+			case '#': /* cpu port name */
+				p_state = P_GETSTR_CPU;
+				break;
+			case '%': /* port number */
+				p_state = P_GETNUM_PORT;
+				break;
+			case '+': /* tag type */
+				p_state = P_GETNUM_TAG;
+				break;
+			case '^': /* bind to host rings only */
+				reg->nr_mode = NR_REG_SW;
+				p_state = P_SET_MODE;
+				break;
+			case '*': /* bind to both host and hardware rings */
+				reg->nr_mode = NR_REG_NIC_SW;
+				p_state = P_SET_MODE;
+				break;
+
+			case '<': /* vlan identifier */
+				p_state = P_GETNUM_VLAN_ID;
+				break;
+
+			case '>': /* vlan priority */
+				p_state = P_GETNUM_VLAN_PRIO;
+				break;
+
+			default:
+				nmctx_ferror(ctx, "unknown modifier: '%c'", *scan);
+				goto fail;
+			}
+
+			if (state_arr[p_state]) {
+				nmctx_ferror(ctx, "modifier already used: '%c'", *scan);
+				goto fail;
+			}
+			scan++;
+			break;
+
+		case P_GETSTR_CPU:
+			tmp = scan;
+			while (!index("#%+*^<>", *scan)) {
+				scan++;
+				len++;
+			}
+			if (len >= NETMAP_REQ_IFNAMSIZ)
+				len = NETMAP_REQ_IFNAMSIZ - 1;
+			memcpy(reg->cpu_port_name, tmp, len);
+			reg->cpu_port_name[len] = '\0';
+
+			state_arr[p_state] = 1;
+			p_state = P_START;
+			break;
+
+		case P_GETNUM_PORT:
+			if (!isdigit(*scan)) {
+				nmctx_ferror(ctx, "got '%s' while expecting a number", scan);
+				goto fail;
+			}
+			val = strtol(scan, (char **)&scan, 10);
+			if (val < 0 || val >= DSA_MAX_PORTS) {
+				nmctx_ferror(ctx, "port num '%ld' out of range [0, %d)",
+					     val, DSA_MAX_PORTS);
+				goto fail;
+			}
+			reg->port_num = val;
+
+			state_arr[p_state] = 1;
+			p_state = P_START;
+			break;
+
+		case P_GETNUM_TAG:
+			if (!isdigit(*scan)) {
+				nmctx_ferror(ctx, "got '%s' while expecting a number", scan);
+				goto fail;
+			}
+			val = strtol(scan, (char **)&scan, 10);
+			if (val != TAG_DSA_TYPE && val != TAG_EDSA_TYPE) {
+				nmctx_ferror(ctx, "'%ld' invalid tag type", val);
+				goto fail;
+			}
+			reg->tag_type = val;
+
+			state_arr[p_state] = 1;
+			p_state = P_START;
+			break;
+
+		case P_GETNUM_VLAN_ID:
+			if (!isdigit(*scan)) {
+				nmctx_ferror(ctx, "got '%s' while expecting a number", scan);
+				goto fail;
+			}
+			val = strtol(scan, (char **)&scan, 10);
+			if (val < 0 || val >= MAX_VLAN_ID) {
+				nmctx_ferror(ctx, "vlan id '%ld' out of range [0, %d)",
+					     val, MAX_VLAN_ID);
+				goto fail;
+			}
+			reg->vlan_id = val;
+			reg->tagged = 1;
+
+			state_arr[p_state] = 1;
+			p_state = P_START;
+			break;
+
+		case P_GETNUM_VLAN_PRIO:
+			if (!isdigit(*scan)) {
+				nmctx_ferror(ctx, "got '%s' while expecting a number", scan);
+				goto fail;
+			}
+			val = strtol(scan, (char **)&scan, 10);
+			if (val < 0 || val >= MAX_VLAN_PRIO) {
+				nmctx_ferror(ctx, "vlan prio '%ld' out of range [0, %d)",
+					     val, MAX_VLAN_PRIO);
+				goto fail;
+			}
+			reg->vlan_prio = val;
+			reg->tagged = 1;
+
+			state_arr[p_state] = 1;
+			p_state = P_START;
+			break;
+
+		case P_SET_MODE:
+			state_arr[p_state] = 1;
+			p_state = P_START;
+			break;
+
+		default:
+			nmctx_ferror(ctx, "unexpected state: %d", p_state);
+			goto fail;
+		}
+	}
+
+	if (p_state != P_START && p_state != P_SET_MODE) {
+		nmctx_ferror(ctx, "unexpected end of request");
+		goto fail;
+	}
+
+	if (!len) {
+		nmctx_ferror(ctx, "cpu port name is required", *scan);
+		goto fail;
+	}
+
+	*pifname = scan;
+	return 0;
+fail:
+	if (!errno)
+		errno = EINVAL;
+	return -1;
+}
+
+#endif
+
+int
+nmreq_register_decode(const char **pifname, struct nmreq_register *r,
+		struct nmctx *ctx)
+{
+	return nmreq_register_decode_netmap_vale(pifname, r, ctx);
+}
 
 static int
 nmreq_option_parsekeys(const char *prefix, char *body, struct nmreq_opt_parser *p,
