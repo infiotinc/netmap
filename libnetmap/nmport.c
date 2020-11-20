@@ -591,6 +591,16 @@ nmport_prepare(const char *ifname)
 	if (d == NULL)
 		goto err;
 
+#if CONFIG_NETMAP_DSA
+	char dsa_ifname[NETMAP_REQ_IFNAMSIZ];
+	if (!strncmp(ifname, DSA_IF_PREFIX, strlen(DSA_IF_PREFIX))) {
+		if (!nmdsa_find_port_cfg(d, ifname, dsa_ifname,
+					 NETMAP_REQ_IFNAMSIZ))
+			return NULL;
+		ifname = dsa_ifname;
+	}
+#endif
+
 	/* parse the header */
 	if (nmport_parse(d, ifname) < 0)
 		goto err;

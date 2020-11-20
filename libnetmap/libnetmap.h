@@ -735,9 +735,12 @@ void nmctx_unlock(struct nmctx *);
 
 #ifdef CONFIG_NETMAP_DSA
 
+#define DSA_IF_PREFIX "dsa:"
 int nmdsa_init(void);
+void nmdsa_fini(void);
 void nmdsa_config_print(void);
-
+int nmdsa_find_port_cfg(struct nmport_d *d, const char *iface,
+		char *dsa_iface_buf, uint16_t buf_len);
 #else
 
 static inline int nmdsa_init(void)
@@ -748,6 +751,7 @@ static inline int nmdsa_init(void)
 }
 
 static inline void nmdsa_config_print(void) { }
+static inline void nmdsa_fini(void) { }
 
 #endif
 

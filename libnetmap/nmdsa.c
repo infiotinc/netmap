@@ -47,6 +47,7 @@
 #define BIND_MODE_ANNOT_HW ""
 #define TAG_EDSA_TYPE_STR "edsa"
 #define DSA_CFG_FILE_NAME "dsa.cfg"
+#define NETMAP_IF_PREFIX "netmap:"
 
 typedef struct dsa_port_cfg {
 	char profile_name[MAX_NAME_LEN];
@@ -117,6 +118,21 @@ bind_mode_to_str(uint8_t bind_mode)
 		return BIND_MODE_HOST;
 	default:
 		return "n/a";
+	}
+}
+
+static char *
+bind_mode_to_annot(uint8_t bind_mode)
+{
+	switch (bind_mode) {
+	case NR_REG_NIC_SW:
+		return BIND_MODE_ANNOT_ALL;
+	case NR_REG_ALL_NIC:
+		return BIND_MODE_ANNOT_HW;
+	case NR_REG_SW:
+		return BIND_MODE_ANNOT_HOST;
+	default:
+		return BIND_MODE_ANNOT_HW;
 	}
 }
 
@@ -314,6 +330,52 @@ dsa_config_validate(void)
 	return 0;
 }
 
+static int
+dsa_cpu_port_open(void)
+{
+	char cpu_if_name[2 * NETMAP_REQ_IFNAMSIZ];
+
+	snprintf(cpu_if_name, 2 * NETMAP_REQ_IFNAMSIZ, "%s%s", NETMAP_IF_PREFIX,
+	         dsa_cfg.dsa_ports[0].cpu_port_name);
+
+	dsa_cfg.nm_cpu_port = nmport_open(cpu_if_name);
+	if (dsa_cfg.nm_cpu_port)
+		return 0;
+	return 1;
+}
+
+int
+nmdsa_find_port_cfg(struct nmport_d *d, const char *iface, char *dsa_iface_buf,
+                    uint16_t buf_len)
+{
+	char *fmt, name[2 * NETMAP_REQ_IFNAMSIZ];
+	struct nmctx *ctx = nmctx_get();
+	dsa_port_cfg_t *ports;
+	int i;
+
+	ports = dsa_cfg.dsa_ports;
+	for (i = 0; i < dsa_cfg.nb_ports; i++) {
+		snprintf(name, 2 * NETMAP_REQ_IFNAMSIZ, "%s%s", DSA_IF_PREFIX,
+		         ports[i].profile_name);
+
+		if (strcmp(iface, name))
+			continue;
+
+		fmt = ports[i].is_tagged ? "dsa:%s#%s%%%d+%d%s<%d>%d"
+		                         : "dsa:%s#%s%%%d+%d%s";
+		snprintf(dsa_iface_buf, buf_len, fmt, ports[i].name,
+		         ports[i].cpu_port_name, ports[i].port_num,
+		         dsa_cfg.tag_type,
+		         bind_mode_to_annot(ports[i].bind_mode),
+		         ports[i].vlan_id, ports[i].vlan_pri);
+		return 1;
+	}
+
+	nmctx_ferror(ctx, "Error DSA port '%s' is not configured\n", iface);
+	nmdsa_config_print();
+	return 0;
+}
+
 void
 nmdsa_config_print(void)
 {
@@ -366,7 +428,19 @@ nmdsa_init(void)
 		return ret;
 	}
 
+	/* open DSA cpu port */
+	ret = dsa_cpu_port_open();
+	if (ret)
+		return ret;
+
 	return 0;
+}
+
+void
+nmdsa_fini(void)
+{
+	/* close DSA cpu port */
+	nmport_close(dsa_cfg.nm_cpu_port);
 }
 
 #endif /* CONFIG_NETMAP_DSA */
