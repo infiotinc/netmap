@@ -1579,6 +1579,11 @@ netmap_get_na(struct nmreq_header *hdr,
 	if (error || *na != NULL)
 		goto out;
 
+	/* try to see if this is a dsa port */
+	error = netmap_get_dsa_na(hdr, na, nmd, create);
+	if (error || *na != NULL)
+		goto out;
+
 	/* try to see if this is a bridge port */
 	error = netmap_get_vale_na(hdr, na, nmd, create);
 	if (error)
@@ -1882,7 +1887,8 @@ netmap_interp_ringid(struct netmap_priv_d *priv, struct nmreq_header *hdr)
 			}
 			priv->np_qfirst[t] = (nr_mode == NR_REG_SW ?
 				nma_get_nrings(na, t) : 0);
-			priv->np_qlast[t] = netmap_all_rings(na, t);
+			priv->np_qlast[t] = netmap_all_rings(na, t) -
+					nma_get_sync_nrings(na, t);
 			nm_prdis("%s: %s %d %d", nr_mode == NR_REG_SW ? "SW" : "NIC+SW",
 				nm_txrx2str(t),
 				priv->np_qfirst[t], priv->np_qlast[t]);

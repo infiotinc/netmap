@@ -27,4 +27,12 @@
 #ifndef _NET_NETMAP_DSA_H__
 #define _NET_NETMAP_DSA_H__
 
+#define DSA_RX_RINGS_NUM 1
+#define DSA_TX_RINGS_NUM 1
+#define DSA_RX_SYNC_RINGS_NUM 1
+
+#define DSA_RX_RING 0
+#define DSA_RX_HOST_RING 1
+#define DSA_RX_SYNC_RING 2
+
 #endif

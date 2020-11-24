@@ -702,6 +702,27 @@ struct nm_config_info {
 	unsigned rx_buf_maxsize;
 };
 
+#ifdef WITH_DSA
+struct netmap_dsa_slave_port_net {
+	bool is_registered;		/* Is port registered */
+};
+
+struct netmap_dsa_slave_port_host {
+	bool is_registered;		/* Is port registered */
+};
+
+struct netmap_dsa_cpu_port {
+	/* Registered DSA slave ports for network communication */
+	struct netmap_dsa_slave_port_net slaves_net[DSA_MAX_PORTS];
+	/* Registered DSA slave ports for host communication */
+	struct netmap_dsa_slave_port_host slaves_host[DSA_MAX_PORTS];
+	/* Number of registered slave ports for network communication*/
+	u8 reg_num_net;
+	/* Number of registered slave ports for host communication */
+	u8 reg_num_host;
+};
+#endif
+
 /*
  * default type for the magic field.
  * May be overriden in glue code.
@@ -765,6 +786,7 @@ struct netmap_adapter {
 	u_int num_tx_rings; /* number of adapter transmit rings */
 	u_int num_host_rx_rings; /* number of host receive rings */
 	u_int num_host_tx_rings; /* number of host transmit rings */
+	u_int num_rx_sync_rings; /* number of adapter receive sync rings */
 
 	u_int num_tx_desc;  /* number of descriptor in each queue */
 	u_int num_rx_desc;
@@ -929,6 +951,11 @@ struct netmap_adapter {
 
 	char name[NETMAP_REQ_IFNAMSIZ]; /* used at least by pipes */
 
+#ifdef WITH_DSA
+	 /* Set when port is used as DSA cpu port */
+	struct netmap_dsa_cpu_port *dsa_cpu;
+#endif
+
 #ifdef WITH_MONITOR
 	unsigned long	monitor_id;	/* debugging */
 #endif
@@ -959,6 +986,12 @@ static __inline u_int
 nma_get_host_nrings(struct netmap_adapter *na, enum txrx t)
 {
 	return (t == NR_TX ? na->num_host_tx_rings : na->num_host_rx_rings);
+}
+
+static __inline u_int
+nma_get_sync_nrings(struct netmap_adapter *na, enum txrx t)
+{
+	return (t == NR_RX ? na->num_rx_sync_rings : 0);
 }
 
 static __inline void
@@ -1071,7 +1104,7 @@ struct netmap_generic_adapter {	/* emulated device */
 static __inline u_int
 netmap_real_rings(struct netmap_adapter *na, enum txrx t)
 {
-	return nma_get_nrings(na, t) +
+	return nma_get_nrings(na, t) + nma_get_sync_nrings(na, t) +
 		!!(na->na_flags & NAF_HOST_RINGS) * nma_get_host_nrings(na, t);
 }
 
@@ -1182,6 +1215,17 @@ struct netmap_pipe_adapter {
 };
 
 #endif /* WITH_PIPES */
+
+#ifdef WITH_DSA
+struct netmap_dsa_adapter {
+	struct netmap_adapter up;
+	struct netmap_adapter *cpu_na;
+	uint16_t port_num;
+	uint16_t tag_type;
+	u8 bind_mode;
+};
+
+#endif /* WITH_DSA */
 
 #ifdef WITH_NMNULL
 struct netmap_null_adapter {
@@ -1582,6 +1626,15 @@ int netmap_get_pipe_na(struct nmreq_header *hdr, struct netmap_adapter **na,
 	((strchr(hdr->nr_name, '{') != NULL || strchr(hdr->nr_name, '}') != NULL) ? EOPNOTSUPP : 0)
 #endif
 
+#define DSA_IF_PREFIX "dsa:"
+#ifdef WITH_DSA
+int netmap_get_dsa_na(struct nmreq_header *hdr, struct netmap_adapter **na,
+		      struct netmap_mem_d *nmd, int create);
+#else /* !WITH_DSA */
+#define netmap_get_dsa_na(hdr, _2, _3, _4)	\
+	(!strncmp(hdr->nr_name, DSA_IF_PREFIX, strlen(DSA_IF_PREFIX)) ? EOPNOTSUPP : 0)
+#endif
+
 #ifdef WITH_MONITOR
 int netmap_get_monitor_na(struct nmreq_header *hdr, struct netmap_adapter **na,
 		struct netmap_mem_d *nmd, int create);
@@ -1684,6 +1737,7 @@ enum {                                  /* debug flags */
 	NM_DEBUG_MEM = 0x4000,		/* verbose memory allocations/deallocations */
 	NM_DEBUG_VALE = 0x8000,		/* debug messages from memory allocators */
 	NM_DEBUG_BDG = NM_DEBUG_VALE,
+	NM_DEBUG_DSA = 0x010000,	/* DSA debug messages */
 };
 
 extern int netmap_txsync_retry;
