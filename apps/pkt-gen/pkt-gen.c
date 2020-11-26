@@ -1200,6 +1200,7 @@ send_packets(struct netmap_ring *ring, struct pkt *pkt, void *frame,
 		buf_changed = slot->flags & NS_BUF_CHANGED;
 
 		slot->flags = 0;
+		slot->data_offs = 0;
 		if (options & OPT_RUBBISH) {
 			/* do nothing */
 		} else if (options & OPT_INDIRECT) {
@@ -1532,8 +1533,8 @@ pong_body(void *data)
 				dst = NETMAP_BUF(txring,
 				    txring->slot[txhead].buf_idx);
 				/* copy... */
-				dpkt = (uint16_t *)dst;
-				spkt = (uint16_t *)src;
+				dpkt = (uint16_t *)(dst + slot->data_offs);
+				spkt = (uint16_t *)(src + slot->data_offs);
 				nm_pkt_copy(src, dst, slot->len);
 				/* swap source and destination MAC */
 				dpkt[0] = spkt[3];
@@ -1543,6 +1544,7 @@ pong_body(void *data)
 				dpkt[4] = spkt[1];
 				dpkt[5] = spkt[2];
 				txring->slot[txhead].len = slot->len;
+				txring->slot[txhead].data_offs = slot->data_offs;
 				txhead = nm_ring_next(txring, txhead);
 				txavail--;
 				sent++;
@@ -1791,7 +1793,7 @@ receive_packets(struct netmap_ring *ring, u_int limit, int dump, uint64_t *bytes
 
 		*bytes += slot->len;
 		if (dump)
-			dump_payload(p, slot->len, ring, head);
+			dump_payload((p + slot->data_offs), slot->len, ring, head);
 		if (!(slot->flags & NS_MOREFRAG))
 			complete++;
 
