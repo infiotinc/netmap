@@ -999,4 +999,29 @@ struct nmreq_opt_offsets {
 	uint64_t		nro_min_gap;
 };
 
+#ifdef CONFIG_NETMAP_DSA
+
+union dsa_tag {
+	struct {
+		uint32_t vlan_id   : 12;
+		uint32_t resvd3    : 1;
+		uint32_t vlan_prio : 3;
+		uint32_t dei       : 1;
+		uint32_t resvd2    : 2;
+		uint32_t port      : 5;
+		uint32_t resvd1    : 5;
+		uint32_t tagged    : 1;
+		uint32_t mode      : 2;
+	} s;
+	uint32_t u32;
+};
+
+struct edsa_tag {
+	uint16_t dsa_ether_type;
+	uint16_t reserved;
+	union dsa_tag dtag;
+};
+
+#endif /* CONFIG_NETMAP_DSA */
+
 #endif /* _NET_NETMAP_H_ */

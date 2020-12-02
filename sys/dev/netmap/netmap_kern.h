@@ -704,6 +704,10 @@ struct nm_config_info {
 
 #ifdef WITH_DSA
 struct netmap_dsa_slave_port_net {
+	struct netmap_kring *rx_kring;
+	struct netmap_kring *rx_sync_kring;
+	NM_SELINFO_T *rx_si;
+	bool is_rx_locked;		/* Is rx sync kring locked */
 	bool is_registered;		/* Is port registered */
 };
 
@@ -712,6 +716,19 @@ struct netmap_dsa_slave_port_host {
 };
 
 struct netmap_dsa_cpu_port {
+	spinlock_t dsa_rx_poll_lock;
+	spinlock_t dsa_tx_poll_lock;
+
+	/*
+	 * Poll params set during first DSA slave registration
+	 * copied from DSA cpu port
+	 */
+	NM_SELINFO_T *np_si[NR_TXRX];
+	uint16_t np_qfirst[NR_TXRX];
+	uint16_t np_qlast[NR_TXRX];
+	uint16_t np_txpoll;
+	int np_sync_flags;
+
 	/* Registered DSA slave ports for network communication */
 	struct netmap_dsa_slave_port_net slaves_net[DSA_MAX_PORTS];
 	/* Registered DSA slave ports for host communication */
@@ -720,6 +737,7 @@ struct netmap_dsa_cpu_port {
 	u8 reg_num_net;
 	/* Number of registered slave ports for host communication */
 	u8 reg_num_host;
+	u8 tag_type;		/* Tag type */
 };
 #endif
 
@@ -884,6 +902,8 @@ struct netmap_adapter {
 	int (*nm_rxsync)(struct netmap_kring *kring, int flags);
 	int (*nm_notify)(struct netmap_kring *kring, int flags);
 	int (*nm_bufcfg)(struct netmap_kring *kring, uint64_t target);
+	int (*nm_poll)(struct netmap_priv_d *priv, int events, NM_SELRECORD_T *sr);
+
 #define NAF_FORCE_READ      1
 #define NAF_FORCE_RECLAIM   2
 #define NAF_CAN_FORWARD_DOWN 4
@@ -952,6 +972,7 @@ struct netmap_adapter {
 	char name[NETMAP_REQ_IFNAMSIZ]; /* used at least by pipes */
 
 #ifdef WITH_DSA
+	struct netmap_priv_d *nm_priv;	/* Reference to netmap private data */
 	 /* Set when port is used as DSA cpu port */
 	struct netmap_dsa_cpu_port *dsa_cpu;
 #endif
@@ -1628,8 +1649,13 @@ int netmap_get_pipe_na(struct nmreq_header *hdr, struct netmap_adapter **na,
 
 #define DSA_IF_PREFIX "dsa:"
 #ifdef WITH_DSA
+#define EDSA_TAG_LEN 8
+#define DSA_TAG_LEN 4
 int netmap_get_dsa_na(struct nmreq_header *hdr, struct netmap_adapter **na,
 		      struct netmap_mem_d *nmd, int create);
+int netmap_dsa_dispatch_rcv_pkts(struct netmap_kring *from_kring,
+				 struct netmap_adapter *cpu_na,
+				 uint16_t poll_port_num);
 #else /* !WITH_DSA */
 #define netmap_get_dsa_na(hdr, _2, _3, _4)	\
 	(!strncmp(hdr->nr_name, DSA_IF_PREFIX, strlen(DSA_IF_PREFIX)) ? EOPNOTSUPP : 0)
@@ -1666,6 +1692,7 @@ extern struct nm_bridge *nm_bridges;
 
 /* Various prototypes */
 int netmap_poll(struct netmap_priv_d *, int events, NM_SELRECORD_T *td);
+int netmap_dsa_poll(struct netmap_priv_d *, int events, NM_SELRECORD_T *td);
 int netmap_init(void);
 void netmap_fini(void);
 int netmap_get_memory(struct netmap_priv_d* p);

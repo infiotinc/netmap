@@ -1222,7 +1222,7 @@ linux_netmap_poll(struct file *file, struct poll_table_struct *pwait)
 		.pwait = pwait
 	};
 	struct netmap_priv_d *priv = file->private_data;
-	return netmap_poll(priv, events, &sr);
+	return priv->np_na->nm_poll(priv, events, &sr);
 }
 
 #ifdef NETMAP_LINUX_HAVE_VMFAULT_T

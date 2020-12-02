@@ -2518,6 +2518,9 @@ netmap_do_regif(struct netmap_priv_d *priv, struct netmap_adapter *na,
 
 	NMG_LOCK_ASSERT();
 	priv->np_na = na;     /* store the reference */
+#ifdef WITH_DSA
+	na->nm_priv = priv;
+#endif
 	error = netmap_mem_finalize(na->nm_mem, na);
 	if (error)
 		goto err;
@@ -3851,6 +3854,190 @@ do_retry_rx:
 #undef want_rx
 }
 
+#ifdef WITH_DSA
+int
+netmap_dsa_poll(struct netmap_priv_d *priv, int events, NM_SELRECORD_T *sr) {
+	struct netmap_dsa_adapter *dsa_na =
+			(struct netmap_dsa_adapter*) priv->np_na;
+	struct netmap_adapter *cpu_na = dsa_na->cpu_na;
+	struct netmap_dsa_cpu_port *dsa_cpu = cpu_na->dsa_cpu;
+	int poll_port_num = dsa_na->port_num;
+	struct netmap_dsa_slave_port_net *slave =
+			&dsa_cpu->slaves_net[poll_port_num];
+	int sync_flags = dsa_cpu->np_sync_flags;
+	struct netmap_kring *kring;
+	struct netmap_ring *ring;
+	u_int i, want[NR_TXRX], revents = 0;
+	u8 poll_cpu_port;
+#define want_tx want[NR_TX]
+#define want_rx want[NR_RX]
+
+	if (unlikely(priv->np_nifp == NULL)) {
+		return POLLERR;
+	}
+	mb(); /* make sure following reads are not from cache */
+
+	if (unlikely(!nm_netmap_on(priv->np_na)))
+		return POLLERR;
+
+	if (unlikely(!nm_netmap_on(cpu_na)))
+		return POLLERR;
+
+	if (netmap_debug & NM_DEBUG_ON)
+		nm_prinf("device %s events 0x%x", dsa_na->up.name, events);
+	want_tx = events & (POLLOUT | POLLWRNORM);
+	want_rx = events & (POLLIN | POLLRDNORM);
+
+	nm_os_selrecord(sr, dsa_cpu->np_si[NR_RX]);
+	nm_os_selrecord(sr, dsa_cpu->np_si[NR_TX]);
+	nm_os_selrecord(sr, slave->rx_si);
+
+	if (dsa_cpu->np_txpoll || want_tx) {
+
+		if (!spin_trylock(&dsa_cpu->dsa_tx_poll_lock)) {
+			/*
+			 * For now for DSA allow only one thread to handle
+			 * packets for transmission on cpu port
+			 */
+			goto do_rcv;
+		}
+
+		for (i = dsa_cpu->np_qfirst[NR_TX]; i < dsa_cpu->np_qlast[NR_TX]; i++) {
+			kring = cpu_na->tx_rings[i];
+			ring = kring->ring;
+
+			/*
+			 * Don't try to txsync this TX ring if we already found some
+			 * space in some of the TX rings (want_tx == 0) and there are no
+			 * TX slots in this ring that need to be flushed to the NIC
+			 * (head == hwcur).
+			 */
+			if (!want_tx && ring->head == kring->nr_hwcur)
+				continue;
+
+			if (nm_kr_tryget(kring, 0, &revents))
+				continue;
+
+			if (nm_txsync_prologue(kring, ring) >= kring->nkr_num_slots) {
+				netmap_ring_reinit(kring);
+				revents |= POLLERR;
+			} else {
+				if (kring->nm_sync(kring, sync_flags))
+					revents |= POLLERR;
+				else
+					nm_sync_finalize(kring);
+			}
+
+			/*
+			 * If we found new slots, notify potential
+			 * listeners on the same ring.
+			 * Since we just did a txsync, look at the copies
+			 * of cur,tail in the kring.
+			 */
+			if (kring->rcur != kring->rtail)
+				revents |= want_tx;
+
+			nm_kr_put(kring);
+		}
+
+		spin_unlock(&dsa_cpu->dsa_tx_poll_lock);
+	}
+
+	do_rcv: if (want_rx) {
+		poll_cpu_port = dsa_na->bind_mode == NR_REG_SW ? 0 : 1;
+
+		/* Iterate over DSA slave port rings */
+		for (i = priv->np_qfirst[NR_RX]; i < priv->np_qlast[NR_RX]; i++) {
+			kring = dsa_na->up.rx_rings[i];
+			ring = kring->ring;
+
+			if (unlikely(nm_kr_tryget(kring, 0, &revents)))
+				continue;
+
+			if (nm_rxsync_prologue(kring, ring) >= kring->nkr_num_slots) {
+				netmap_ring_reinit(kring);
+				revents |= POLLERR;
+			}
+
+			if (kring->nm_sync(kring, sync_flags))
+				revents |= POLLERR;
+			else
+				nm_sync_finalize(kring);
+			ring_timestamp_set(ring);
+
+			if (kring->rcur != kring->rtail) {
+				revents |= want_rx;
+
+				/*
+				 * Packets were found in rx sync kring
+				 * so don't poll on cpu port
+				 */
+				if (i < nma_get_nrings(cpu_na, NR_RX))
+				poll_cpu_port = 0;
+			}
+
+			nm_kr_put(kring);
+		}
+
+		/*
+		 * Don't poll on cpu port in case where we are bound to host
+		 * rings only or if packets were found in rx sync kring
+		 */
+		if (!poll_cpu_port)
+		goto exit;
+
+		if (!spin_trylock(&dsa_cpu->dsa_rx_poll_lock)) {
+			/*
+			 * We only allow one thread to handle received
+			 * packets on DSA cpu port
+			 */
+			return 0;
+		}
+
+		/* Iterate over DSA cpu port rings */
+		for (i = dsa_cpu->np_qfirst[NR_RX]; i < dsa_cpu->np_qlast[NR_RX]; i++) {
+			kring = cpu_na->rx_rings[i];
+			ring = kring->ring;
+
+			if (unlikely(nm_kr_tryget(kring, 0, &revents)))
+				continue;
+
+			if (nm_rxsync_prologue(kring, ring) >= kring->nkr_num_slots) {
+				netmap_ring_reinit(kring);
+				revents |= POLLERR;
+			}
+
+			if (kring->nm_sync(kring, sync_flags))
+				revents |= POLLERR;
+			else
+				nm_sync_finalize(kring);
+			ring_timestamp_set(ring);
+
+			if (kring->rcur == kring->rtail)
+				goto end_rcv_iter;
+
+			if (i >= nma_get_nrings(cpu_na, NR_RX)) {
+				revents |= want_rx;
+				goto end_rcv_iter;
+			}
+
+			/* Dispatch received packets to DSA slave ports */
+			if (netmap_dsa_dispatch_rcv_pkts(kring, cpu_na,
+							poll_port_num))
+				revents |= want_rx;
+end_rcv_iter:
+			nm_kr_put(kring);
+		}
+
+		spin_unlock(&dsa_cpu->dsa_rx_poll_lock);
+	}
+exit:
+	return revents;
+#undef want_tx
+#undef want_rx
+}
+#endif
+
 int
 nma_intr_enable(struct netmap_adapter *na, int onoff)
 {
@@ -3950,6 +4137,10 @@ netmap_attach_common(struct netmap_adapter *na)
 		/* use the global allocator */
 		na->nm_mem = netmap_mem_get(&nm_mem);
 	}
+
+	if (na->nm_poll == NULL)
+		na->nm_poll = netmap_poll;
+
 #ifdef WITH_VALE
 	if (na->nm_bdg_attach == NULL)
 		/* no special nm_bdg_attach callback. On VALE

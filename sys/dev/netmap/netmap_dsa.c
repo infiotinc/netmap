@@ -39,6 +39,7 @@
  */
 #include <net/netmap.h>
 #include <dev/netmap/netmap_kern.h>
+#include <dev/netmap/netmap_mem2.h>
 
 #ifdef WITH_DSA
 
@@ -67,6 +68,9 @@ netmap_dsa_reg_port_net(struct netmap_adapter *cpu_na,
 		return EBUSY;
 
 	netmap_set_all_rings(cpu_na, NM_KR_LOCKED);
+	slave->rx_kring = dsa_na->up.rx_rings[DSA_RX_RING];
+	slave->rx_sync_kring = dsa_na->up.rx_rings[DSA_RX_SYNC_RING];
+	slave->rx_si = &dsa_na->up.rx_rings[DSA_RX_SYNC_RING]->si;
 	slave->is_registered = true;
 	cpu_na->dsa_cpu->reg_num_net++;
 	netmap_set_all_rings(cpu_na, 0);
@@ -256,6 +260,7 @@ netmap_dsa_reg(struct netmap_adapter *na, int onoff)
 	struct netmap_adapter *cpu_na = dsa_na->cpu_na;
 	struct netmap_dsa_cpu_port *dsa_cpu;
 	struct netmap_kring *host_kring;
+	enum txrx t;
 	int ret;
 
 	if (na->active_fds)
@@ -277,6 +282,22 @@ netmap_dsa_reg(struct netmap_adapter *na, int onoff)
 			dsa_cpu = nm_os_malloc(sizeof(*cpu_na->dsa_cpu));
 			if (!dsa_cpu)
 				return ENOMEM;
+
+			spin_lock_init(&dsa_cpu->dsa_rx_poll_lock);
+			spin_lock_init(&dsa_cpu->dsa_tx_poll_lock);
+
+			/* Copy params for poll on DSA cpu port */
+			for_rx_tx(t)
+			{
+				dsa_cpu->np_si[t] = cpu_na->nm_priv->np_si[t];
+				dsa_cpu->np_qfirst[t] =
+				        cpu_na->nm_priv->np_qfirst[t];
+				dsa_cpu->np_qlast[t] =
+				        cpu_na->nm_priv->np_qlast[t];
+			}
+			dsa_cpu->tag_type = dsa_na->tag_type;
+			dsa_cpu->np_txpoll = cpu_na->nm_priv->np_txpoll;
+			dsa_cpu->np_sync_flags = cpu_na->nm_priv->np_sync_flags;
 			/*
 			 * Lock setting of cpu_na->dsa_cpu pointer because it
 			 * is used to indicate whether DSA mode is enabled
@@ -328,6 +349,59 @@ netmap_dsa_reg(struct netmap_adapter *na, int onoff)
 }
 
 static int
+netmap_dsa_rx_sync(struct netmap_kring *kring, int flags)
+{
+	struct netmap_dsa_adapter *dsa_na =
+	        (struct netmap_dsa_adapter *)kring->na;
+	struct netmap_dsa_slave_port_net *slave =
+	        &dsa_na->cpu_na->dsa_cpu->slaves_net[dsa_na->port_num];
+	struct netmap_kring *to_kring = slave->rx_kring;
+	struct netmap_ring *from_ring = slave->rx_sync_kring->ring;
+	struct netmap_ring *to_ring = to_kring->ring;
+	spinlock_t *lock = &slave->rx_sync_kring->q_lock.sl;
+	struct netmap_slot *from_slot, *to_slot;
+	u32 i, n, m, head, tail;
+
+	spin_lock(lock);
+
+	head = from_ring->head;
+	tail = to_ring->tail;
+
+	n = nm_rxring_pkts_avail(from_ring);
+	m = nm_rxring_slots_avail(to_ring);
+	if (m < n) {
+		if (netmap_debug & NM_DEBUG_DSA)
+			nm_prerr("Num of slots avail in rx kring %d is less "
+			         "than number of pkts in rx sync kring %d "
+			         "for port %d",
+			         m, n, dsa_na->port_num);
+		n = m;
+	}
+
+	for (i = 0; i < n; i++) {
+		from_slot = &from_ring->slot[head];
+		to_slot = &to_ring->slot[tail];
+
+		/* Move buffers between krings */
+		netmap_dsa_move_buffers(to_slot, from_slot);
+
+		head = nm_ring_next(from_ring, head);
+		tail = nm_ring_next(to_ring, tail);
+	}
+
+	if (n) {
+		from_ring->head = from_ring->cur = head;
+		to_ring->tail = tail;
+
+		to_kring->nr_hwtail = to_ring->tail;
+		to_kring->nr_hwcur = to_kring->rhead;
+	}
+
+	spin_unlock(lock);
+	return 0;
+}
+
+static int
 netmap_dsa_krings_create(struct netmap_adapter *na)
 {
 	struct netmap_dsa_adapter *dsa_na = (struct netmap_dsa_adapter *)na;
@@ -344,6 +418,8 @@ netmap_dsa_krings_create(struct netmap_adapter *na)
 	    dsa_na->bind_mode == NR_REG_NIC_SW)
 		na->rx_rings[DSA_RX_SYNC_RING]->nr_kflags |= NKR_NEEDRING;
 
+	dsa_na->up.rx_rings[DSA_RX_RING]->nm_sync = netmap_dsa_rx_sync;
+
 	return 0;
 }
 
@@ -354,6 +430,147 @@ netmap_dsa_krings_delete(struct netmap_adapter *na)
 		nm_prerr("Deleting krings");
 
 	netmap_krings_delete(na);
+}
+
+int
+netmap_dsa_dispatch_rcv_pkts(struct netmap_kring *from_kring,
+                             struct netmap_adapter *cpu_na,
+                             uint16_t poll_port_num)
+{
+	struct netmap_dsa_slave_port_net *slaves = cpu_na->dsa_cpu->slaves_net;
+	struct netmap_ring *from_ring = from_kring->ring;
+	struct netmap_slot *from_slot, *to_slot;
+	struct netmap_kring *to_kring;
+	struct netmap_ring *to_ring;
+	u32 i, n, head, ret = 0;
+	u8 tag_type, tag_len;
+	union dsa_tag *tag;
+	spinlock_t *lock;
+	u8 src_port_num;
+	u8 *buf;
+
+	tag_type = cpu_na->dsa_cpu->tag_type;
+	head = from_ring->head;
+	n = nm_rxring_pkts_avail(from_ring);
+	for (i = 0; i < n; i++) {
+		from_slot = &from_ring->slot[head];
+
+		buf = NMB(cpu_na, from_slot) + from_slot->data_offs;
+		tag = netmap_dsa_get_tag(buf, tag_type, &tag_len);
+		if (!tag)
+			goto next_slot;
+
+		if (tag->s.mode != DSA_FORWARD_MODE) {
+			if (netmap_debug & NM_DEBUG_DSA)
+				nm_prerr("Only forward frames are accepted, "
+				         "received frame in mode %d",
+				         tag->s.mode);
+			goto next_slot;
+		}
+
+		src_port_num = tag->s.port;
+		if (src_port_num >= DSA_MAX_PORTS) {
+			if (netmap_debug & NM_DEBUG_DSA)
+				nm_prerr("Port number of received net frame "
+				         "%d exceeds maximum supported ports "
+				         "%d",
+				         src_port_num, DSA_MAX_PORTS);
+			goto next_slot;
+		}
+
+		if (!slaves[src_port_num].is_registered) {
+			if (netmap_debug & NM_DEBUG_DSA)
+				nm_prerr("Received net packet for not "
+				         "registered slave port %d",
+				         src_port_num);
+			goto next_slot;
+		}
+
+		/*
+		 * If source port of received packet is equal to poll_port_num
+		 * then we can move received packet directly to rx kring
+		 * because we are in the context of the thread which called
+		 * poll, otherwise we need to move packet to rx_sync kring
+		 * because a tread might be processing packets from its
+		 * rx kring. In this case we also have to sync on rx sync kring
+		 * because owning thread might try to read packets from its
+		 * rx sync kring.
+		 */
+		if (src_port_num == poll_port_num) {
+			to_kring = slaves[src_port_num].rx_kring;
+			lock = NULL;
+		} else {
+			to_kring = slaves[src_port_num].rx_sync_kring;
+			lock = &to_kring->q_lock.sl;
+		}
+
+		if (lock && !slaves[src_port_num].is_rx_locked) {
+			/*
+			 * Lock rx sync kring only if it wasn't already
+			 * locked during processing of current kring
+			 */
+			spin_lock(lock);
+			slaves[src_port_num].is_rx_locked = true;
+		}
+
+		to_ring = to_kring->ring;
+		if (!nm_rxring_slots_avail(to_ring)) {
+			if (netmap_debug & NM_DEBUG_DSA)
+				nm_prerr("No available slots in destination "
+				         "ring for net port %d, poll_port_num "
+				         "%d",
+				         tag->s.port, poll_port_num);
+			if (lock) {
+				/*
+				 * There is no space in destination kring
+				 * therefore unlock it to allow owning thread
+				 * to read packets
+				 */
+				spin_unlock(lock);
+				slaves[src_port_num].is_rx_locked = false;
+			}
+
+			goto next_slot;
+		}
+
+		/* Move buffers between krings */
+		to_slot = &to_ring->slot[to_ring->tail];
+		netmap_dsa_move_buffers(to_slot, from_slot);
+		to_ring->tail = nm_ring_next(to_ring, to_ring->tail);
+		to_kring->rtail = to_kring->nr_hwtail = to_ring->tail;
+		to_kring->nr_hwcur = to_kring->rhead;
+
+		/*
+		 * The function does the following:
+		 * - moves Eth MAC addresses up by tag_len bytes,
+		 * - moves tag before Eth frame,
+		 * - increases data offset in slot by tag_len bytes
+		 * - decreases data length in slot by tag_len bytes.
+		 */
+		netmap_dsa_move_tag_buf(to_slot, buf, tag, tag_len);
+
+		if (src_port_num == poll_port_num)
+			/*
+			 * We return true only if there was at least one packet
+			 * dispatched to the thread in which context poll call
+			 * is being run
+			 */
+			ret = 1;
+	next_slot:
+		head = nm_ring_next(from_ring, head);
+	}
+
+	from_ring->head = from_ring->cur = head;
+
+	/* Unlock locked krings and notify listeners */
+	for (i = 0; i < DSA_MAX_PORTS; i++)
+		if (slaves[i].is_rx_locked) {
+			spin_unlock(&slaves[i].rx_sync_kring->q_lock.sl);
+			slaves[i].is_rx_locked = false;
+			nm_os_selwakeup(slaves[i].rx_si);
+		}
+
+	return ret;
 }
 
 int
@@ -409,6 +626,7 @@ netmap_get_dsa_na(struct nmreq_header *hdr, struct netmap_adapter **na,
 	dsa_na->up.nm_txsync = netmap_dsa_sync;
 	dsa_na->up.nm_rxsync = netmap_dsa_sync;
 	dsa_na->up.nm_register = netmap_dsa_reg;
+	dsa_na->up.nm_poll = netmap_dsa_poll;
 	dsa_na->up.nm_krings_create = netmap_dsa_krings_create;
 	dsa_na->up.nm_krings_delete = netmap_dsa_krings_delete;
 
