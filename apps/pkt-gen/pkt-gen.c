@@ -312,7 +312,7 @@ struct glob_arg {
 	int wait_link;
 	int framing;		/* #bits of framing (for bw output) */
 };
-enum dev_type { DEV_NONE, DEV_NETMAP, DEV_PCAP, DEV_TAP };
+enum dev_type { DEV_NONE, DEV_NETMAP, DEV_PCAP, DEV_TAP, DEV_DSA };
 
 enum {
 	TD_TYPE_SENDER = 1,
@@ -1182,7 +1182,7 @@ send_packets(struct netmap_ring *ring, struct pkt *pkt, void *frame,
 	if (options & (OPT_COPY | OPT_PREFETCH) ) {
 		for (sent = 0; sent < count; sent++) {
 			struct netmap_slot *slot = &ring->slot[head];
-			char *p = NETMAP_BUF(ring, slot->buf_idx);
+			char *p = NETMAP_BUF(ring, slot->buf_idx) + slot->data_offs;
 
 			__builtin_prefetch(p);
 			head = nm_ring_next(ring, head);
@@ -1196,11 +1196,10 @@ send_packets(struct netmap_ring *ring, struct pkt *pkt, void *frame,
 		u_int tosend = size;
 
 		slot = &ring->slot[head];
-		p = NETMAP_BUF(ring, slot->buf_idx);
+		p = NETMAP_BUF(ring, slot->buf_idx) + slot->data_offs;
 		buf_changed = slot->flags & NS_BUF_CHANGED;
 
 		slot->flags = 0;
-		slot->data_offs = 0;
 		if (options & OPT_RUBBISH) {
 			/* do nothing */
 		} else if (options & OPT_INDIRECT) {
@@ -1220,7 +1219,7 @@ send_packets(struct netmap_ring *ring, struct pkt *pkt, void *frame,
 				f += frag_size;
 				head = nm_ring_next(ring, head);
 				slot = &ring->slot[head];
-				fp = NETMAP_BUF(ring, slot->buf_idx);
+				fp = NETMAP_BUF(ring, slot->buf_idx) + slot->data_offs;
 			}
 			n -= (frags - 1);
 			p = fp;
@@ -1346,7 +1345,7 @@ ping_body(void *data)
 		for (m = 0; (unsigned)m < limit; m++) {
 			slot = &ring->slot[ring->head];
 			slot->len = size;
-			p = NETMAP_BUF(ring, slot->buf_idx);
+			p = NETMAP_BUF(ring, slot->buf_idx) + slot->data_offs;
 
 			if (nm_ring_empty(ring)) {
 				D("-- ouch, cannot send");
@@ -1397,7 +1396,7 @@ ping_body(void *data)
 				int pos;
 
 				slot = &ring->slot[ring->head];
-				p = NETMAP_BUF(ring, slot->buf_idx);
+				p = NETMAP_BUF(ring, slot->buf_idx) + slot->data_offs;
 
 				clock_gettime(CLOCK_REALTIME_PRECISE, &now);
 				bcopy(p+42, &seq, sizeof(seq));
@@ -1524,17 +1523,19 @@ pong_body(void *data)
 				uint32_t head = rxring->head;
 				struct netmap_slot *slot = &rxring->slot[head];
 				char *src, *dst;
-				src = NETMAP_BUF(rxring, slot->buf_idx);
+				src = NETMAP_BUF(rxring, slot->buf_idx) +
+				      slot->data_offs;
 				//D("got pkt %p of size %d", src, slot->len);
 				rxring->head = rxring->cur = nm_ring_next(rxring, head);
 				rx++;
 				if (txavail == 0)
 					continue;
 				dst = NETMAP_BUF(txring,
-				    txring->slot[txhead].buf_idx);
+				                 txring->slot[txhead].buf_idx) +
+				      txring->slot[txhead].data_offs;
 				/* copy... */
-				dpkt = (uint16_t *)(dst + slot->data_offs);
-				spkt = (uint16_t *)(src + slot->data_offs);
+				dpkt = (uint16_t *)dst;
+				spkt = (uint16_t *)src;
 				nm_pkt_copy(src, dst, slot->len);
 				/* swap source and destination MAC */
 				dpkt[0] = spkt[3];
@@ -2031,7 +2032,7 @@ txseq_body(void *data)
 		for (fcnt = frags, head = ring->head;
 				sent < limit; sent++, sequence++) {
 			struct netmap_slot *slot = &ring->slot[head];
-			char *p = NETMAP_BUF(ring, slot->buf_idx);
+			char *p = NETMAP_BUF(ring, slot->buf_idx) + slot->data_offs;
 			uint16_t *w = (uint16_t *)PKT(pkt, body, targ->g->af), t;
 
 			memcpy(&sum, targ->g->af == AF_INET ? &pkt->ipv4.udp.uh_sum : &pkt->ipv6.udp.uh_sum, sizeof(sum));
@@ -2229,7 +2230,7 @@ rxseq_body(void *data)
 
 			for (head = ring->head, i = 0; i < limit; i++) {
 				struct netmap_slot *slot = &ring->slot[head];
-				char *p = NETMAP_BUF(ring, slot->buf_idx);
+				char *p = NETMAP_BUF(ring, slot->buf_idx) + slot->data_offs;
 				int len = slot->len;
 				struct pkt *pkt;
 
@@ -2516,7 +2517,8 @@ start_threads(struct glob_arg *g) {
 		t->g = g;
 		memcpy(t->seed, &seed, sizeof(t->seed));
 
-		if (g->dev_type == DEV_NETMAP) {
+		if (g->dev_type == DEV_NETMAP ||
+		    g->dev_type == DEV_DSA) {
 			int m = -1;
 
 			/*
@@ -2720,6 +2722,9 @@ main_thread(struct glob_arg *g)
 		tx_output(g, &cur, delta_t, "Sent");
 	else if (g->td_type == TD_TYPE_RECEIVER)
 		tx_output(g, &cur, delta_t, "Received");
+
+	if (g->dev_type == DEV_DSA)
+		nmdsa_fini();
 }
 
 struct td_desc {
@@ -2809,7 +2814,7 @@ tap_alloc(char *dev)
 int
 main(int arc, char **argv)
 {
-	int i;
+	int i, ret;
 	struct sigaction sa;
 	sigset_t ss;
 
@@ -2935,6 +2940,11 @@ main(int arc, char **argv)
 				g.dev_type = DEV_NETMAP;
 			} else if (!strncmp(optarg, "tap", 3)) {
 				g.dev_type = DEV_TAP;
+			} else if (!strncmp(optarg, "dsa:", 4)) {
+				g.dev_type = DEV_DSA;
+				ret = nmdsa_init();
+				if (ret)
+					return ret;
 			} else { /* prepend netmap: */
 				g.dev_type = DEV_NETMAP;
 				sprintf(g.ifname, "netmap:%s", optarg);
