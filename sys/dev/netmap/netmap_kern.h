@@ -703,9 +703,23 @@ struct nm_config_info {
 };
 
 #ifdef WITH_DSA
+struct netmap_dsa_stats {
+	u64 drop_rx_inv_tag; /* Dropped pkts because of invalid tag */
+	u64 drop_rx_inv_port; /* Dropped pkts because of invalid port */
+	u64 drop_rx_not_reg; /* Dropped pkts for not registered port */
+};
+
+struct netmap_dsa_slave_net_stats {
+	u64 drop_rx_full; /* Dropped pkts - no space in rx kring */
+	u64 drop_rx_sync_full; /* Dropped pkts - no space in rx sync kring */
+	u64 event_rx_no_space; /* Event - not enough space avail in rx kring */
+	u64 rcv_pkts; /* Number of received packets */
+};
+
 struct netmap_dsa_slave_port_net {
 	struct netmap_kring *rx_kring;
 	struct netmap_kring *rx_sync_kring;
+	struct netmap_dsa_slave_net_stats stats;
 	NM_SELINFO_T *rx_si;
 	bool is_rx_locked;		/* Is rx sync kring locked */
 	bool is_registered;		/* Is port registered */
@@ -733,6 +747,8 @@ struct netmap_dsa_cpu_port {
 	struct netmap_dsa_slave_port_net slaves_net[DSA_MAX_PORTS];
 	/* Registered DSA slave ports for host communication */
 	struct netmap_dsa_slave_port_host slaves_host[DSA_MAX_PORTS];
+ 	/*  Network port independent statistics*/
+ 	struct netmap_dsa_stats stats_net;
 	/* Number of registered slave ports for network communication*/
 	u8 reg_num_net;
 	/* Number of registered slave ports for host communication */
@@ -1765,6 +1781,7 @@ enum {                                  /* debug flags */
 	NM_DEBUG_VALE = 0x8000,		/* debug messages from memory allocators */
 	NM_DEBUG_BDG = NM_DEBUG_VALE,
 	NM_DEBUG_DSA = 0x010000,	/* DSA debug messages */
+	NM_DEBUG_DSA_STATS = 0x020000,	/* DSA print port statistics */
 };
 
 extern int netmap_txsync_retry;

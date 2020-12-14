@@ -54,6 +54,26 @@ netmap_dsa_sync(struct netmap_kring *kring, int flags)
 	return ENOTSUPP;
 }
 
+static void
+netmap_dsa_print_port_stats_net(struct netmap_adapter *dsa_na,
+                                struct netmap_dsa_slave_port_net *slave)
+{
+	nm_prerr("DSA port net '%s' statistics", dsa_na->name);
+	nm_prerr("drop_rx_full : %llu", slave->stats.drop_rx_full);
+	nm_prerr("drop_rx_sync_full : %llu", slave->stats.drop_rx_sync_full);
+	nm_prerr("event_rx_full : %llu", slave->stats.event_rx_no_space);
+	nm_prerr("rcv_pkts : %llu", slave->stats.rcv_pkts);
+}
+
+static void
+netmap_dsa_print_stats_net(struct netmap_dsa_cpu_port *dsa_cpu)
+{
+	nm_prerr("DSA port independent net statistics");
+	nm_prerr("drop_inv_tag : %llu\n", dsa_cpu->stats_net.drop_rx_inv_tag);
+	nm_prerr("drop_inv_port : %llu", dsa_cpu->stats_net.drop_rx_inv_port);
+	nm_prerr("drop_not_reg : %llu", dsa_cpu->stats_net.drop_rx_not_reg);
+}
+
 static int
 netmap_dsa_reg_port_net(struct netmap_adapter *cpu_na,
                         struct netmap_dsa_adapter *dsa_na)
@@ -98,6 +118,11 @@ netmap_dsa_unreg_port_net(struct netmap_adapter *cpu_na,
 		return EINVAL;
 
 	netmap_set_all_rings(cpu_na, NM_KR_LOCKED);
+	if (netmap_debug & NM_DEBUG_DSA_STATS) {
+		netmap_dsa_print_port_stats_net(&dsa_na->up, slave);
+		memset(&slave->stats, 0,
+		       sizeof(struct netmap_dsa_slave_net_stats));
+	}
 	slave->is_registered = false;
 	cpu_na->dsa_cpu->reg_num_net--;
 	netmap_set_all_rings(cpu_na, 0);
@@ -324,6 +349,8 @@ netmap_dsa_reg(struct netmap_adapter *na, int onoff)
 			return ret;
 
 		if (!dsa_cpu->reg_num_net && !dsa_cpu->reg_num_host) {
+			if (netmap_debug & NM_DEBUG_DSA_STATS)
+				netmap_dsa_print_stats_net(dsa_cpu);
 
 			/*
 			 * Lock setting of cpu_na->dsa_cpu pointer because it
@@ -375,6 +402,8 @@ netmap_dsa_rx_sync(struct netmap_kring *kring, int flags)
 			         "than number of pkts in rx sync kring %d "
 			         "for port %d",
 			         m, n, dsa_na->port_num);
+
+		slave->stats.event_rx_no_space++;
 		n = m;
 	}
 
@@ -395,6 +424,8 @@ netmap_dsa_rx_sync(struct netmap_kring *kring, int flags)
 
 		to_kring->nr_hwtail = to_ring->tail;
 		to_kring->nr_hwcur = to_kring->rhead;
+
+		slave->stats.rcv_pkts += n;
 	}
 
 	spin_unlock(lock);
@@ -438,6 +469,7 @@ netmap_dsa_dispatch_rcv_pkts(struct netmap_kring *from_kring,
                              uint16_t poll_port_num)
 {
 	struct netmap_dsa_slave_port_net *slaves = cpu_na->dsa_cpu->slaves_net;
+	struct netmap_dsa_stats *stats = &cpu_na->dsa_cpu->stats_net;
 	struct netmap_ring *from_ring = from_kring->ring;
 	struct netmap_slot *from_slot, *to_slot;
 	struct netmap_kring *to_kring;
@@ -457,14 +489,18 @@ netmap_dsa_dispatch_rcv_pkts(struct netmap_kring *from_kring,
 
 		buf = NMB(cpu_na, from_slot) + from_slot->data_offs;
 		tag = netmap_dsa_get_tag(buf, tag_type, &tag_len);
-		if (!tag)
+		if (!tag) {
+			stats->drop_rx_inv_tag++;
 			goto next_slot;
+		}
 
 		if (tag->s.mode != DSA_FORWARD_MODE) {
 			if (netmap_debug & NM_DEBUG_DSA)
 				nm_prerr("Only forward frames are accepted, "
 				         "received frame in mode %d",
 				         tag->s.mode);
+
+			stats->drop_rx_inv_tag++;
 			goto next_slot;
 		}
 
@@ -475,6 +511,8 @@ netmap_dsa_dispatch_rcv_pkts(struct netmap_kring *from_kring,
 				         "%d exceeds maximum supported ports "
 				         "%d",
 				         src_port_num, DSA_MAX_PORTS);
+
+			stats->drop_rx_inv_port++;
 			goto next_slot;
 		}
 
@@ -483,6 +521,8 @@ netmap_dsa_dispatch_rcv_pkts(struct netmap_kring *from_kring,
 				nm_prerr("Received net packet for not "
 				         "registered slave port %d",
 				         src_port_num);
+
+			stats->drop_rx_not_reg++;
 			goto next_slot;
 		}
 
@@ -527,8 +567,11 @@ netmap_dsa_dispatch_rcv_pkts(struct netmap_kring *from_kring,
 				 * to read packets
 				 */
 				spin_unlock(lock);
+
 				slaves[src_port_num].is_rx_locked = false;
-			}
+				slaves[src_port_num].stats.drop_rx_sync_full++;
+			} else
+				slaves[src_port_num].stats.drop_rx_full++;
 
 			goto next_slot;
 		}
@@ -556,6 +599,13 @@ netmap_dsa_dispatch_rcv_pkts(struct netmap_kring *from_kring,
 			 * is being run
 			 */
 			ret = 1;
+
+		/*
+		 * Increase number of received packets only
+		 * in case if we moved packet to rx kring
+		 */
+		if (!lock)
+			slaves[src_port_num].stats.rcv_pkts++;
 	next_slot:
 		head = nm_ring_next(from_ring, head);
 	}
