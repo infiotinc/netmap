@@ -726,6 +726,8 @@ struct netmap_dsa_slave_port_net {
 };
 
 struct netmap_dsa_slave_port_host {
+	struct netmap_kring *host_kring;
+	char *port_name;
 	bool is_registered;		/* Is port registered */
 };
 
@@ -1260,6 +1262,7 @@ struct netmap_dsa_adapter {
 	uint16_t port_num;
 	uint16_t tag_type;
 	u8 bind_mode;
+	u8 tag_len;
 };
 
 #endif /* WITH_DSA */
@@ -1672,6 +1675,9 @@ int netmap_get_dsa_na(struct nmreq_header *hdr, struct netmap_adapter **na,
 int netmap_dsa_dispatch_rcv_pkts(struct netmap_kring *from_kring,
 				 struct netmap_adapter *cpu_na,
 				 uint16_t poll_port_num);
+int netmap_dsa_enqueue_host_pkt(struct netmap_adapter *cpu_na,
+				struct mbuf *m);
+int netmap_dsa_rxsync_from_host(struct netmap_kring *kring, int flags);
 #else /* !WITH_DSA */
 #define netmap_get_dsa_na(hdr, _2, _3, _4)	\
 	(!strncmp(hdr->nr_name, DSA_IF_PREFIX, strlen(DSA_IF_PREFIX)) ? EOPNOTSUPP : 0)

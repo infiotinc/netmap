@@ -152,6 +152,8 @@ netmap_dsa_reg_port_host(struct netmap_adapter *cpu_na,
 		return EBUSY;
 
 	mbq_lock(&host_kring->rx_queue);
+	slave->host_kring = dsa_na->up.rx_rings[DSA_RX_HOST_RING];
+	slave->port_name = dsa_na->up.name;
 	slave->is_registered = true;
 	cpu_na->dsa_cpu->reg_num_host++;
 	mbq_unlock(&host_kring->rx_queue);
@@ -450,7 +452,8 @@ netmap_dsa_krings_create(struct netmap_adapter *na)
 		na->rx_rings[DSA_RX_SYNC_RING]->nr_kflags |= NKR_NEEDRING;
 
 	dsa_na->up.rx_rings[DSA_RX_RING]->nm_sync = netmap_dsa_rx_sync;
-
+	dsa_na->up.rx_rings[DSA_RX_HOST_RING]->nm_sync =
+	        netmap_dsa_rxsync_from_host;
 	return 0;
 }
 
@@ -624,6 +627,72 @@ netmap_dsa_dispatch_rcv_pkts(struct netmap_kring *from_kring,
 }
 
 int
+netmap_dsa_enqueue_host_pkt(struct netmap_adapter *cpu_na, struct mbuf *m)
+{
+	struct netmap_dsa_slave_port_host *slaves =
+	        cpu_na->dsa_cpu->slaves_host;
+	u8 busy, tag_type, tag_len;
+	struct netmap_kring *kring;
+	union dsa_tag *tag;
+	u8 src_port_num;
+	struct mbq *q;
+	int ret = 0;
+
+	tag_type = cpu_na->dsa_cpu->tag_type;
+	tag = netmap_dsa_get_tag(m->data, tag_type, &tag_len);
+	if (!tag)
+		goto exit;
+
+	if (tag->s.mode != DSA_FROM_CPU_MODE) {
+		if (netmap_debug & NM_DEBUG_DSA)
+			nm_prerr("Only from cpu frames are accepted, "
+			         "received frame in mode %d",
+			         tag->s.mode);
+		goto exit;
+	}
+
+	src_port_num = tag->s.port;
+	if (src_port_num >= DSA_MAX_PORTS) {
+		if (netmap_debug & NM_DEBUG_DSA)
+			nm_prerr("Port number of received host frame %d "
+			         "exceeds maximum supported ports %d",
+			         src_port_num, DSA_MAX_PORTS);
+		goto exit;
+	}
+
+	if (!slaves[src_port_num].is_registered) {
+		if (netmap_debug & NM_DEBUG_DSA)
+			nm_prerr("Received host packet for not registered "
+			         "slave port %d",
+			         src_port_num);
+		goto exit;
+	}
+
+	kring = slaves[src_port_num].host_kring;
+	q = &kring->rx_queue;
+
+	mbq_lock(q);
+	busy = kring->nr_hwtail - kring->nr_hwcur;
+	if (busy < 0)
+		busy += kring->nkr_num_slots;
+	if (busy + mbq_len(q) >= kring->nkr_num_slots - 1) {
+		nm_prlim(2, "%s full hwcur %d hwtail %d qlen %d",
+		         slaves[src_port_num].port_name, kring->nr_hwcur,
+		         kring->nr_hwtail, mbq_len(q));
+	} else {
+		netmap_dsa_move_tag_skbuf(m, tag, tag_len);
+		mbq_enqueue(q, m);
+		ret = 1;
+	}
+	mbq_unlock(q);
+
+	if (ret)
+		kring->nm_notify(kring, 0);
+exit:
+	return ret;
+}
+
+int
 netmap_get_dsa_na(struct nmreq_header *hdr, struct netmap_adapter **na,
                   struct netmap_mem_d *nmd, int create)
 {
@@ -696,7 +765,10 @@ netmap_get_dsa_na(struct nmreq_header *hdr, struct netmap_adapter **na,
 	/* Validate tag */
 	switch (dsa_na->tag_type) {
 	case TAG_DSA_TYPE:
+		dsa_na->tag_len = DSA_TAG_LEN;
+		break;
 	case TAG_EDSA_TYPE:
+		dsa_na->tag_len = EDSA_TAG_LEN;
 		break;
 	default:
 		nm_prerr("Unsupported tag type %d", dsa_na->tag_type);

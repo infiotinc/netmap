@@ -1342,7 +1342,8 @@ netmap_txsync_to_host(struct netmap_kring *kring, int flags)
  * flag in the kring to let the caller push them out
  */
 static int
-netmap_rxsync_from_host(struct netmap_kring *kring, int flags)
+netmap_rxsync_from_host_offset(struct netmap_kring *kring, int flags,
+			       uint16_t offset)
 {
 	struct netmap_adapter *na = kring->na;
 	struct netmap_ring *ring = kring->ring;
@@ -1375,6 +1376,7 @@ netmap_rxsync_from_host(struct netmap_kring *kring, int flags)
 
 			slot->len = len;
 			slot->flags = 0;
+			slot->data_offs = offset;
 			nm_i = nm_next(nm_i, lim);
 			mbq_enqueue(&fq, m);
 		}
@@ -1404,6 +1406,22 @@ netmap_rxsync_from_host(struct netmap_kring *kring, int flags)
 	return ret;
 }
 
+static int
+netmap_rxsync_from_host(struct netmap_kring *kring, int flags)
+{
+	return netmap_rxsync_from_host_offset(kring, flags, 0);
+}
+
+#ifdef WITH_DSA
+int
+netmap_dsa_rxsync_from_host(struct netmap_kring *kring, int flags)
+{
+	struct netmap_dsa_adapter *dsa_na =
+				(struct netmap_dsa_adapter*)kring->na;
+
+	return netmap_rxsync_from_host_offset(kring, flags, dsa_na->tag_len);
+}
+#endif
 
 /* Get a netmap adapter for the port.
  *
@@ -4453,6 +4471,18 @@ netmap_transmit(struct ifnet *ifp, struct mbuf *m)
 	 */
 	mbq_lock(q);
 
+#ifdef WITH_DSA
+	/* Check if this is DSA cpu port */
+	if (na->dsa_cpu) {
+		if (!netmap_dsa_enqueue_host_pkt(na, m)) {
+			m_freem(m);
+			error = 0;
+		}
+
+		mbq_unlock(q);
+		return (error);
+	}
+#endif
 	busy = kring->nr_hwtail - kring->nr_hwcur;
 	if (busy < 0)
 		busy += kring->nkr_num_slots;

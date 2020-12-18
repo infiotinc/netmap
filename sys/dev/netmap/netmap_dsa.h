@@ -35,6 +35,7 @@
 #define DSA_RX_HOST_RING 1
 #define DSA_RX_SYNC_RING 2
 
+#define DSA_FROM_CPU_MODE 1
 #define DSA_FORWARD_MODE 3
 
 static inline union dsa_tag *
@@ -93,6 +94,16 @@ netmap_dsa_move_tag_buf(struct netmap_slot *slot, u8 *buf,
 	slot->len -= tag_len;
 
 	tag_ptr = (union dsa_tag *)(buf + tag_len - DSA_TAG_LEN);
+	*tag_ptr = tag;
+}
+
+static inline void
+netmap_dsa_move_tag_skbuf(struct mbuf *m, union dsa_tag *tag_ptr, u8 tag_len)
+{
+	union dsa_tag tag = *tag_ptr;
+
+	memmove(m->data + tag_len, m->data, 2 * ETH_ALEN);
+	tag_ptr = (union dsa_tag *)(m->data + tag_len - DSA_TAG_LEN);
 	*tag_ptr = tag;
 }
 
