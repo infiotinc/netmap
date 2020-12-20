@@ -93,10 +93,47 @@ netmap_dsa_print_stats_net(struct netmap_dsa_cpu_port *dsa_cpu)
 }
 
 static int
+netmap_dsa_reserve_tx_cpu_kring(struct netmap_adapter *cpu_na, u8 *is_excl_tx)
+{
+	int i;
+
+	*is_excl_tx = 1;
+	for (i = 0; i < (cpu_na->num_tx_rings - 1) && i < DSA_MAX_PORTS; i++)
+		if (!cpu_na->dsa_cpu->is_tx_kring_used[i]) {
+			cpu_na->dsa_cpu->is_tx_kring_used[i] = true;
+			break;
+		}
+
+	if (i == cpu_na->num_tx_rings - 1) {
+		/*
+		 * When there are less cpu tx krings than DSA slave ports then
+		 * the last cpu tx kring is shared between DSA slave ports
+		 */
+		i = cpu_na->num_tx_rings - 1;
+		*is_excl_tx = 0;
+	}
+
+	return i;
+}
+
+static void
+netmap_dsa_update_kring_offset(struct netmap_kring *kring, int offset)
+{
+	int i;
+
+	for (i = 0; i < kring->nkr_num_slots; i++) {
+		struct netmap_slot *slot = &kring->ring->slot[i];
+		slot->data_offs += offset;
+		slot->len -= offset;
+	}
+}
+
+static int
 netmap_dsa_reg_port_net(struct netmap_adapter *cpu_na,
                         struct netmap_dsa_adapter *dsa_na)
 {
 	struct netmap_dsa_slave_port_net *slave;
+	u8 idx, is_excl_tx;
 
 	if (!cpu_na->dsa_cpu)
 		return EINVAL;
@@ -109,16 +146,29 @@ netmap_dsa_reg_port_net(struct netmap_adapter *cpu_na,
 	slave->rx_kring = dsa_na->up.rx_rings[DSA_RX_RING];
 	slave->rx_sync_kring = dsa_na->up.rx_rings[DSA_RX_SYNC_RING];
 	slave->rx_si = &dsa_na->up.rx_rings[DSA_RX_SYNC_RING]->si;
+
+	idx = netmap_dsa_reserve_tx_cpu_kring(cpu_na, &is_excl_tx);
+	slave->tx_kring = dsa_na->up.tx_rings[DSA_TX_RING];
+	slave->tx_cpu_kring = cpu_na->tx_rings[idx];
+	netmap_dsa_update_kring_offset(slave->tx_kring,
+	                               sizeof(struct edsa_tag));
+	if (is_excl_tx)
+		slave->tx_cpu_kring_lock = NULL;
+	else
+		slave->tx_cpu_kring_lock = &cpu_na->tx_rings[idx]->q_lock.sl;
+	dsa_na->tx_cpu_kring_idx = idx;
+
 	slave->is_registered = true;
 	cpu_na->dsa_cpu->reg_num_net++;
 	netmap_set_all_rings(cpu_na, 0);
 
 	if (netmap_debug & NM_DEBUG_DSA)
 		nm_prerr("DSA slave port net '%s' registered to '%s', "
-		         "port num = %d, tag type = %d, num of registered "
-		         "ports = %d",
+		         "port num = %d, tag type = %d, tx cpu kring index %d "
+		         "mode %d, num of registered ports = %d",
 		         dsa_na->up.name, cpu_na->name, dsa_na->port_num,
-		         dsa_na->tag_type, cpu_na->dsa_cpu->reg_num_net);
+		         dsa_na->tag_type, dsa_na->tx_cpu_kring_idx, is_excl_tx,
+		         cpu_na->dsa_cpu->reg_num_net);
 	return 0;
 }
 
@@ -141,6 +191,8 @@ netmap_dsa_unreg_port_net(struct netmap_adapter *cpu_na,
 		memset(&slave->stats, 0,
 		       sizeof(struct netmap_dsa_slave_net_stats));
 	}
+
+	cpu_na->dsa_cpu->is_tx_kring_used[dsa_na->tx_cpu_kring_idx] = false;
 	slave->is_registered = false;
 	cpu_na->dsa_cpu->reg_num_net--;
 	netmap_set_all_rings(cpu_na, 0);
@@ -334,7 +386,6 @@ netmap_dsa_reg(struct netmap_adapter *na, int onoff)
 				return ENOMEM;
 
 			spin_lock_init(&dsa_cpu->dsa_rx_poll_lock);
-			spin_lock_init(&dsa_cpu->dsa_tx_poll_lock);
 
 			/* Copy params for poll on DSA cpu port */
 			for_rx_tx(t)
@@ -460,6 +511,69 @@ netmap_dsa_rx_sync(struct netmap_kring *kring, int flags)
 }
 
 static int
+netmap_dsa_tx_sync(struct netmap_kring *kring, int flags)
+{
+	struct netmap_dsa_adapter *dsa_na =
+	        (struct netmap_dsa_adapter *)kring->na;
+	struct netmap_dsa_cpu_port *dsa_cpu = dsa_na->cpu_na->dsa_cpu;
+	struct netmap_dsa_slave_port_net *slave =
+	        &dsa_cpu->slaves_net[dsa_na->port_num];
+	struct netmap_adapter *cpu_na = dsa_na->cpu_na;
+	struct netmap_ring *to_ring = slave->tx_cpu_kring->ring;
+	struct netmap_kring *from_kring = slave->tx_kring;
+	struct netmap_ring *from_ring = from_kring->ring;
+	struct netmap_slot *from_slot, *to_slot;
+	u32 i, n, m, head, tail;
+	u8 *buf, *tag;
+
+	tag = dsa_na->tag_type == TAG_EDSA_TYPE ? (u8 *)&dsa_na->tag
+	                                        : (u8 *)&dsa_na->tag.dtag;
+
+	/* Lock access to tx cpu kring if we share it with other threads */
+	if (slave->tx_cpu_kring_lock)
+		spin_lock(slave->tx_cpu_kring_lock);
+
+	head = to_ring->head;
+	tail = from_ring->tail;
+
+	n = nm_txring_pkts_avail(from_ring);
+	m = nm_txring_slots_avail(to_ring);
+	if (m < n)
+		n = m;
+
+	for (i = 0; i < n; i++) {
+		to_slot = &to_ring->slot[head];
+		tail = nm_ring_next(from_ring, tail);
+		from_slot = &from_ring->slot[tail];
+
+		netmap_dsa_move_buffers(to_slot, from_slot);
+		if (dsa_na->tag_len <= to_slot->data_offs) {
+			buf = NMB(cpu_na, to_slot) + to_slot->data_offs;
+			netmap_dsa_add_tag(buf, to_slot, tag, dsa_na->tag_len);
+		} else {
+			nm_prerr("Error packet headroom %d is less than "
+			         "required for tag %d. Packet will be dropped",
+			         to_slot->data_offs, dsa_na->tag_len);
+		}
+
+		head = nm_ring_next(to_ring, head);
+	}
+
+	if (n) {
+		to_ring->head = to_ring->cur = head;
+		from_ring->tail = tail;
+
+		from_kring->nr_hwtail = from_ring->tail;
+		from_kring->nr_hwcur = from_kring->rhead;
+	}
+
+	if (slave->tx_cpu_kring_lock)
+		spin_unlock(slave->tx_cpu_kring_lock);
+
+	return 0;
+}
+
+static int
 netmap_dsa_krings_create(struct netmap_adapter *na)
 {
 	struct netmap_dsa_adapter *dsa_na = (struct netmap_dsa_adapter *)na;
@@ -479,6 +593,8 @@ netmap_dsa_krings_create(struct netmap_adapter *na)
 	dsa_na->up.rx_rings[DSA_RX_RING]->nm_sync = netmap_dsa_rx_sync;
 	dsa_na->up.rx_rings[DSA_RX_HOST_RING]->nm_sync =
 	        netmap_dsa_rxsync_from_host;
+	dsa_na->up.tx_rings[DSA_TX_RING]->nm_sync = netmap_dsa_tx_sync;
+
 	return 0;
 }
 
@@ -809,6 +925,15 @@ netmap_get_dsa_na(struct nmreq_header *hdr, struct netmap_adapter **na,
 		ret = EINVAL;
 		goto free_dsa_na;
 	};
+
+	/* Build tag */
+	dsa_na->tag.dsa_ether_type = ETH_P_EDSA;
+	dsa_na->tag.dtag.s.mode = DSA_FROM_CPU_MODE;
+	dsa_na->tag.dtag.s.tagged = req->tagged;
+	dsa_na->tag.dtag.s.port = req->port_num;
+	dsa_na->tag.dtag.s.vlan_prio = req->vlan_prio;
+	dsa_na->tag.dtag.s.vlan_id = req->vlan_id;
+	dsa_na->tag.dtag.u32 = htonl(dsa_na->tag.dtag.u32);
 
 	if (netmap_debug & NM_DEBUG_DSA) {
 		nm_prerr("DSA cpu port '%s' rx/tx rings = %d/%d,"

@@ -35,6 +35,8 @@
 #define DSA_RX_HOST_RING 1
 #define DSA_RX_SYNC_RING 2
 
+#define DSA_TX_RING 0
+
 #define DSA_FROM_CPU_MODE 1
 #define DSA_FORWARD_MODE 3
 
@@ -107,6 +109,15 @@ netmap_dsa_move_tag_skbuf(struct mbuf *m, union dsa_tag *tag_ptr, u8 tag_len)
 	*tag_ptr = tag;
 }
 
+static inline void
+netmap_dsa_add_tag(u8 *buf, struct netmap_slot *slot, u8 *tag_ptr, u8 tag_len)
+{
+	buf = memmove(buf - tag_len, buf, 2 * ETH_ALEN);
+	memcpy(buf + 2 * ETH_ALEN, tag_ptr, tag_len);
+	slot->data_offs -= tag_len;
+	slot->len += tag_len;
+}
+
 static inline uint32_t
 nm_ring_next(struct netmap_ring *r, uint32_t i)
 {
@@ -128,6 +139,24 @@ nm_rxring_slots_avail(struct netmap_ring *ring)
 	int ret = ring->head - ring->tail;
 	if (ret <= 0)
 		ret += ring->num_slots - 1;
+	return ret;
+}
+
+static inline uint32_t
+nm_txring_pkts_avail(struct netmap_ring *ring)
+{
+	int ret = ring->head - ring->tail;
+	if (ret <= 0)
+		ret += ring->num_slots;
+	return ret - 1;
+}
+
+static inline uint32_t
+nm_txring_slots_avail(struct netmap_ring *ring)
+{
+	int ret = ring->tail - ring->head;
+	if (ret < 0)
+		ret += ring->num_slots;
 	return ret;
 }
 

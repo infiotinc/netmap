@@ -1212,7 +1212,8 @@ netmap_grab_packets(struct netmap_kring *kring, struct mbq *q, int force)
 		}
 		slot->flags &= ~NS_FORWARD; // XXX needed ?
 		/* XXX TODO: adapt to the case of a multisegment packet */
-		m = m_devget(NMB(na, slot), slot->len, 0, na->ifp, NULL);
+		m = m_devget(NMB(na, slot) + slot->data_offs, slot->len, 0,
+			     na->ifp, NULL);
 
 		if (m == NULL)
 			break;
@@ -3910,25 +3911,19 @@ netmap_dsa_poll(struct netmap_priv_d *priv, int events, NM_SELRECORD_T *sr) {
 	nm_os_selrecord(sr, dsa_cpu->np_si[NR_TX]);
 	nm_os_selrecord(sr, slave->rx_si);
 
+	poll_cpu_port = dsa_na->bind_mode == NR_REG_SW ? 0 : 1;
+
 	if (dsa_cpu->np_txpoll || want_tx) {
 
-		if (!spin_trylock(&dsa_cpu->dsa_tx_poll_lock)) {
-			/*
-			 * For now for DSA allow only one thread to handle
-			 * packets for transmission on cpu port
-			 */
-			goto do_rcv;
-		}
-
-		for (i = dsa_cpu->np_qfirst[NR_TX]; i < dsa_cpu->np_qlast[NR_TX]; i++) {
-			kring = cpu_na->tx_rings[i];
+		/* Iterate over DSA slave port rings */
+		for (i = priv->np_qfirst[NR_TX]; i < priv->np_qlast[NR_TX]; i++) {
+			kring = dsa_na->up.tx_rings[i];
 			ring = kring->ring;
 
 			/*
-			 * Don't try to txsync this TX ring if we already found some
-			 * space in some of the TX rings (want_tx == 0) and there are no
-			 * TX slots in this ring that need to be flushed to the NIC
-			 * (head == hwcur).
+			 * Don't txsync if we already found some space in one
+			 * of tx rings (want_tx == 0) and there are no tx slots
+			 * in this ring to be flushed (head == hwcur)
 			 */
 			if (!want_tx && ring->head == kring->nr_hwcur)
 				continue;
@@ -3946,23 +3941,61 @@ netmap_dsa_poll(struct netmap_priv_d *priv, int events, NM_SELRECORD_T *sr) {
 					nm_sync_finalize(kring);
 			}
 
-			/*
-			 * If we found new slots, notify potential
-			 * listeners on the same ring.
-			 * Since we just did a txsync, look at the copies
-			 * of cur,tail in the kring.
-			 */
-			if (kring->rcur != kring->rtail)
+			if (kring->rcur != kring->rtail) {
 				revents |= want_tx;
+				want_tx = 0;
+			}
 
 			nm_kr_put(kring);
 		}
 
-		spin_unlock(&dsa_cpu->dsa_tx_poll_lock);
+		/*
+		 * Don't poll on cpu port in case where we are bound to host
+		 * rings only
+		 */
+		if (!poll_cpu_port)
+			goto do_rcv;
+
+		/* Send available packets over cpu port */
+		kring = slave->tx_cpu_kring;
+		ring = kring->ring;
+
+		/* Lock access to tx cpu kring if we share it with other threads */
+		if (slave->tx_cpu_kring_lock)
+			spin_lock(slave->tx_cpu_kring_lock);
+
+		/*
+		 * Don't txsync if we already found some space in one
+		 * of tx rings (want_tx == 0) and there are no tx slots
+		 * in this ring to be flushed (head == hwcur)
+		 */
+		if (!want_tx && ring->head == kring->nr_hwcur)
+			goto end_tx;
+
+		if (nm_kr_tryget(kring, 0, &revents))
+			goto end_tx;
+
+		if (nm_txsync_prologue(kring, ring) >= kring->nkr_num_slots) {
+			netmap_ring_reinit(kring);
+			revents |= POLLERR;
+		} else {
+			if (kring->nm_sync(kring, sync_flags))
+				revents |= POLLERR;
+			else
+				nm_sync_finalize(kring);
+		}
+
+		if (kring->rcur != kring->rtail)
+			revents |= want_tx;
+
+		nm_kr_put(kring);
+end_tx:
+		if (slave->tx_cpu_kring_lock)
+			spin_unlock(slave->tx_cpu_kring_lock);
 	}
 
-	do_rcv: if (want_rx) {
-		poll_cpu_port = dsa_na->bind_mode == NR_REG_SW ? 0 : 1;
+do_rcv:
+	if (want_rx) {
 
 		/* Iterate over DSA slave port rings */
 		for (i = priv->np_qfirst[NR_RX]; i < priv->np_qlast[NR_RX]; i++) {

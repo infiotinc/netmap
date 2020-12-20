@@ -727,6 +727,9 @@ struct netmap_dsa_slave_port_net {
 	struct netmap_dsa_slave_net_stats stats;
 	NM_SELINFO_T *rx_si;
 	bool is_rx_locked;		/* Is rx sync kring locked */
+	struct netmap_kring *tx_kring;
+	struct netmap_kring *tx_cpu_kring;
+	spinlock_t *tx_cpu_kring_lock;
 	bool is_registered;		/* Is port registered */
 };
 
@@ -739,7 +742,6 @@ struct netmap_dsa_slave_port_host {
 
 struct netmap_dsa_cpu_port {
 	spinlock_t dsa_rx_poll_lock;
-	spinlock_t dsa_tx_poll_lock;
 
 	/*
 	 * Poll params set during first DSA slave registration
@@ -755,7 +757,9 @@ struct netmap_dsa_cpu_port {
 	struct netmap_dsa_slave_port_net slaves_net[DSA_MAX_PORTS];
 	/* Registered DSA slave ports for host communication */
 	struct netmap_dsa_slave_port_host slaves_host[DSA_MAX_PORTS];
- 	/*  Network port independent statistics*/
+	/* Indicates if cpu port tx kring is used by one of DSA slave ports */
+	bool is_tx_kring_used[DSA_MAX_PORTS];
+	/* Network port independent statistics*/
  	struct netmap_dsa_stats stats_net;
 	/* Host port independent statistics*/
 	 struct netmap_dsa_stats stats_host;
@@ -1270,9 +1274,10 @@ struct netmap_dsa_adapter {
 	uint16_t port_num;
 	uint16_t tag_type;
 	u8 bind_mode;
+	u8 tx_cpu_kring_idx;
+	struct edsa_tag tag;
 	u8 tag_len;
 };
-
 #endif /* WITH_DSA */
 
 #ifdef WITH_NMNULL
