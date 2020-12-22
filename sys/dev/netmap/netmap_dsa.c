@@ -55,6 +55,24 @@ netmap_dsa_sync(struct netmap_kring *kring, int flags)
 }
 
 static void
+netmap_dsa_print_port_stats_host(struct netmap_adapter *dsa_na,
+                                 struct netmap_dsa_slave_port_host *slave)
+{
+	nm_prerr("DSA port host '%s' statistics", dsa_na->name);
+	nm_prerr("drop_rx_no_space : %llu", slave->stats.drop_rx_no_space);
+	nm_prerr("rcv_pkts : %llu", slave->stats.rcv_pkts);
+}
+
+static void
+netmap_dsa_print_stats_host(struct netmap_dsa_cpu_port *dsa_cpu)
+{
+	nm_prerr("DSA port independent host statistics");
+	nm_prerr("drop_inv_tag : %llu\n", dsa_cpu->stats_host.drop_rx_inv_tag);
+	nm_prerr("drop_inv_port : %llu", dsa_cpu->stats_host.drop_rx_inv_port);
+	nm_prerr("drop_not_reg : %llu", dsa_cpu->stats_host.drop_rx_not_reg);
+}
+
+static void
 netmap_dsa_print_port_stats_net(struct netmap_adapter *dsa_na,
                                 struct netmap_dsa_slave_port_net *slave)
 {
@@ -182,6 +200,11 @@ netmap_dsa_unreg_port_host(struct netmap_adapter *cpu_na,
 		return EINVAL;
 
 	mbq_lock(&host_kring->rx_queue);
+	if (netmap_debug & NM_DEBUG_DSA_STATS) {
+		netmap_dsa_print_port_stats_host(&dsa_na->up, slave);
+		memset(&slave->stats, 0,
+		       sizeof(struct netmap_dsa_slave_host_stats));
+	}
 	slave->is_registered = false;
 	cpu_na->dsa_cpu->reg_num_host--;
 	mbq_unlock(&host_kring->rx_queue);
@@ -351,8 +374,10 @@ netmap_dsa_reg(struct netmap_adapter *na, int onoff)
 			return ret;
 
 		if (!dsa_cpu->reg_num_net && !dsa_cpu->reg_num_host) {
-			if (netmap_debug & NM_DEBUG_DSA_STATS)
+			if (netmap_debug & NM_DEBUG_DSA_STATS) {
 				netmap_dsa_print_stats_net(dsa_cpu);
+				netmap_dsa_print_stats_host(dsa_cpu);
+			}
 
 			/*
 			 * Lock setting of cpu_na->dsa_cpu pointer because it
@@ -631,6 +656,7 @@ netmap_dsa_enqueue_host_pkt(struct netmap_adapter *cpu_na, struct mbuf *m)
 {
 	struct netmap_dsa_slave_port_host *slaves =
 	        cpu_na->dsa_cpu->slaves_host;
+	struct netmap_dsa_stats *stats = &cpu_na->dsa_cpu->stats_host;
 	u8 busy, tag_type, tag_len;
 	struct netmap_kring *kring;
 	union dsa_tag *tag;
@@ -648,6 +674,8 @@ netmap_dsa_enqueue_host_pkt(struct netmap_adapter *cpu_na, struct mbuf *m)
 			nm_prerr("Only from cpu frames are accepted, "
 			         "received frame in mode %d",
 			         tag->s.mode);
+
+		stats->drop_rx_inv_tag++;
 		goto exit;
 	}
 
@@ -657,6 +685,8 @@ netmap_dsa_enqueue_host_pkt(struct netmap_adapter *cpu_na, struct mbuf *m)
 			nm_prerr("Port number of received host frame %d "
 			         "exceeds maximum supported ports %d",
 			         src_port_num, DSA_MAX_PORTS);
+
+		stats->drop_rx_inv_port++;
 		goto exit;
 	}
 
@@ -665,6 +695,8 @@ netmap_dsa_enqueue_host_pkt(struct netmap_adapter *cpu_na, struct mbuf *m)
 			nm_prerr("Received host packet for not registered "
 			         "slave port %d",
 			         src_port_num);
+
+		stats->drop_rx_not_reg++;
 		goto exit;
 	}
 
@@ -679,9 +711,11 @@ netmap_dsa_enqueue_host_pkt(struct netmap_adapter *cpu_na, struct mbuf *m)
 		nm_prlim(2, "%s full hwcur %d hwtail %d qlen %d",
 		         slaves[src_port_num].port_name, kring->nr_hwcur,
 		         kring->nr_hwtail, mbq_len(q));
+		slaves[src_port_num].stats.drop_rx_no_space++;
 	} else {
 		netmap_dsa_move_tag_skbuf(m, tag, tag_len);
 		mbq_enqueue(q, m);
+		slaves[src_port_num].stats.rcv_pkts++;
 		ret = 1;
 	}
 	mbq_unlock(q);

@@ -716,6 +716,11 @@ struct netmap_dsa_slave_net_stats {
 	u64 rcv_pkts; /* Number of received packets */
 };
 
+struct netmap_dsa_slave_host_stats {
+	u64 drop_rx_no_space; /* Dropped pkts not enough space in host kring */
+	u64 rcv_pkts; /* Number of packets submitted to host rx kring */
+};
+
 struct netmap_dsa_slave_port_net {
 	struct netmap_kring *rx_kring;
 	struct netmap_kring *rx_sync_kring;
@@ -727,6 +732,7 @@ struct netmap_dsa_slave_port_net {
 
 struct netmap_dsa_slave_port_host {
 	struct netmap_kring *host_kring;
+	struct netmap_dsa_slave_host_stats stats;
 	char *port_name;
 	bool is_registered;		/* Is port registered */
 };
@@ -751,6 +757,8 @@ struct netmap_dsa_cpu_port {
 	struct netmap_dsa_slave_port_host slaves_host[DSA_MAX_PORTS];
  	/*  Network port independent statistics*/
  	struct netmap_dsa_stats stats_net;
+	/* Host port independent statistics*/
+	 struct netmap_dsa_stats stats_host;
 	/* Number of registered slave ports for network communication*/
 	u8 reg_num_net;
 	/* Number of registered slave ports for host communication */
