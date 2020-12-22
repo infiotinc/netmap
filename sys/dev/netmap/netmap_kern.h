@@ -714,6 +714,8 @@ struct netmap_dsa_slave_net_stats {
 	u64 drop_rx_sync_full; /* Dropped pkts - no space in rx sync kring */
 	u64 event_rx_no_space; /* Event - not enough space avail in rx kring */
 	u64 rcv_pkts; /* Number of received packets */
+	u64 drop_tx_no_headroom; /* Dropped pkts - not enough headroom in pkt */
+	u64 sent_pkts; /* Number of packets submitted to cpu tx kring */
 };
 
 struct netmap_dsa_slave_host_stats {

@@ -81,6 +81,9 @@ netmap_dsa_print_port_stats_net(struct netmap_adapter *dsa_na,
 	nm_prerr("drop_rx_sync_full : %llu", slave->stats.drop_rx_sync_full);
 	nm_prerr("event_rx_full : %llu", slave->stats.event_rx_no_space);
 	nm_prerr("rcv_pkts : %llu", slave->stats.rcv_pkts);
+	nm_prerr("drop_tx_no_headroom : %llu",
+	         slave->stats.drop_tx_no_headroom);
+	nm_prerr("sent_pkts : %llu", slave->stats.sent_pkts);
 }
 
 static void
@@ -554,6 +557,8 @@ netmap_dsa_tx_sync(struct netmap_kring *kring, int flags)
 			nm_prerr("Error packet headroom %d is less than "
 			         "required for tag %d. Packet will be dropped",
 			         to_slot->data_offs, dsa_na->tag_len);
+
+			slave->stats.drop_tx_no_headroom++;
 		}
 
 		head = nm_ring_next(to_ring, head);
@@ -565,6 +570,8 @@ netmap_dsa_tx_sync(struct netmap_kring *kring, int flags)
 
 		from_kring->nr_hwtail = from_ring->tail;
 		from_kring->nr_hwcur = from_kring->rhead;
+
+		slave->stats.sent_pkts += n;
 	}
 
 	if (slave->tx_cpu_kring_lock)
