@@ -182,7 +182,7 @@ main(int argc, char **argv)
 	struct nmport_d *pa = NULL, *pb = NULL;
 	char *ifa = NULL, *ifb = NULL;
 	char ifabuf[64] = { 0 };
-	int loopback = 0;
+	int ret, loopback = 0, dsa = 0;
 
 	fprintf(stderr, "%s built %s %s\n\n", argv[0], __DATE__, __TIME__);
 
@@ -245,17 +245,33 @@ main(int argc, char **argv)
 		D("invalid wait_link %d, set to 4", wait_link);
 		wait_link = 4;
 	}
+
+	if ((ifa && !strncmp(ifa, "dsa:", 4)) ||
+	    (ifb && !strncmp(ifb, "dsa:", 4))) {
+		ret = nmdsa_init();
+		if (ret)
+			return ret;
+		dsa = 1;
+	}
+
 	if (!strcmp(ifa, ifb)) {
 		if (!loopback) {
-			D("same interface, endpoint 0 goes to host");
-			snprintf(ifabuf, sizeof(ifabuf) - 1, "%s^", ifa);
-			ifa = ifabuf;
+			if (!dsa) {
+				D("same interface, endpoint 0 goes to host");
+				snprintf(ifabuf, sizeof(ifabuf) - 1, "%s^",
+					 ifa);
+				ifa = ifabuf;
+			} else
+				D("for host communication when using DSA "
+				  "interface please use DSA profile which "
+				  "binds to host rings");
 		} else {
 			D("same interface, loopbacking traffic");
 		}
 	} else {
 		/* two different interfaces. Take all rings on if1 */
 	}
+
 	pa = nmport_open(ifa);
 	if (pa == NULL) {
 		D("cannot open %s", ifa);
@@ -355,6 +371,7 @@ main(int argc, char **argv)
 	}
 	nmport_close(pb);
 	nmport_close(pa);
+	nmdsa_fini();
 
 	return (0);
 }
