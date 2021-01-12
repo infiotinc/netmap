@@ -903,6 +903,7 @@ netmap_get_dsa_na(struct nmreq_header *hdr, struct netmap_adapter **na,
 	dsa_na->up.nm_rxsync = netmap_dsa_sync;
 	dsa_na->up.nm_register = netmap_dsa_reg;
 	dsa_na->up.nm_poll = netmap_dsa_poll;
+	dsa_na->up.nm_ioctl_rxtx_sync = netmap_ioctl_dsa_rxtx_sync;
 	dsa_na->up.nm_krings_create = netmap_dsa_krings_create;
 	dsa_na->up.nm_krings_delete = netmap_dsa_krings_delete;
 

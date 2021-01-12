@@ -1731,6 +1731,7 @@ extern struct nm_bridge *nm_bridges;
 /* Various prototypes */
 int netmap_poll(struct netmap_priv_d *, int events, NM_SELRECORD_T *td);
 int netmap_dsa_poll(struct netmap_priv_d *, int events, NM_SELRECORD_T *td);
+int netmap_ioctl_dsa_rxtx_sync(struct netmap_priv_d *priv, u_long cmd);
 int netmap_init(void);
 void netmap_fini(void);
 int netmap_get_memory(struct netmap_priv_d* p);
