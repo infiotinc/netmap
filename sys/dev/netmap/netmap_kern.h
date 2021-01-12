@@ -935,6 +935,7 @@ struct netmap_adapter {
 	int (*nm_notify)(struct netmap_kring *kring, int flags);
 	int (*nm_bufcfg)(struct netmap_kring *kring, uint64_t target);
 	int (*nm_poll)(struct netmap_priv_d *priv, int events, NM_SELRECORD_T *sr);
+	int (*nm_ioctl_rxtx_sync)(struct netmap_priv_d *priv, u_long cmd);
 
 #define NAF_FORCE_READ      1
 #define NAF_FORCE_RECLAIM   2

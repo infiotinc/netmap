@@ -2697,6 +2697,79 @@ static int nmreq_copyin(struct nmreq_header *, int);
 static int nmreq_copyout(struct nmreq_header *, int);
 static int nmreq_checkoptions(struct nmreq_header *);
 
+static int
+netmap_ioctl_rxtx_sync(struct netmap_priv_d *priv, u_long cmd)
+{
+	struct netmap_adapter *na = priv->np_na;
+	int sync_flags = priv->np_sync_flags;
+	struct netmap_kring **krings;
+	u_int i, qfirst, qlast;
+	int error = 0;
+	struct mbq q;
+	enum txrx t;
+
+	if (unlikely(priv->np_nifp == NULL))
+		return ENXIO;
+
+	mb(); /* make sure following reads are not from cache */
+
+	if (unlikely(priv->np_csb_atok_base)) {
+		nm_prerr("Invalid sync in CSB mode");
+		return EBUSY;
+	}
+
+	mbq_init(&q);
+	t = (cmd == NIOCTXSYNC ? NR_TX : NR_RX);
+	qfirst = priv->np_qfirst[t];
+	qlast = priv->np_qlast[t];
+	krings = NMR(na, t);
+
+	for (i = qfirst; i < qlast; i++) {
+		struct netmap_kring *kring = krings[i];
+		struct netmap_ring *ring = kring->ring;
+
+		if (unlikely(nm_kr_tryget(kring, 1, &error))) {
+			error = (error ? EIO : 0);
+			continue;
+		}
+
+		if (cmd == NIOCTXSYNC) {
+			if (netmap_debug & NM_DEBUG_TXSYNC)
+				nm_prinf("pre txsync ring %d cur %d hwcur %d",
+				    i, ring->cur,
+				    kring->nr_hwcur);
+			if (nm_txsync_prologue(kring, ring) >= kring->nkr_num_slots) {
+				netmap_ring_reinit(kring);
+			} else if (kring->nm_sync(kring, sync_flags | NAF_FORCE_RECLAIM) == 0) {
+				nm_sync_finalize(kring);
+			}
+			if (netmap_debug & NM_DEBUG_TXSYNC)
+				nm_prinf("post txsync ring %d cur %d hwcur %d",
+				    i, ring->cur,
+				    kring->nr_hwcur);
+		} else {
+			if (nm_rxsync_prologue(kring, ring) >= kring->nkr_num_slots) {
+				netmap_ring_reinit(kring);
+			}
+			if (nm_may_forward_up(kring)) {
+				/* transparent forwarding, see netmap_poll() */
+				netmap_grab_packets(kring, &q, netmap_fwd);
+			}
+			if (kring->nm_sync(kring, sync_flags | NAF_FORCE_READ) == 0) {
+				nm_sync_finalize(kring);
+			}
+			ring_timestamp_set(ring);
+		}
+		nm_kr_put(kring);
+	}
+
+	if (mbq_peek(&q)) {
+		netmap_send_up(na->ifp, &q);
+	}
+
+	return error;
+}
+
 /*
  * ioctl(2) support for the "netmap" device.
  *
@@ -2714,14 +2787,10 @@ int
 netmap_ioctl(struct netmap_priv_d *priv, u_long cmd, caddr_t data,
 		struct thread *td, int nr_body_is_user)
 {
-	struct mbq q;	/* packets from RX hw queues to host stack */
 	struct netmap_adapter *na = NULL;
 	struct netmap_mem_d *nmd = NULL;
 	struct ifnet *ifp = NULL;
 	int error = 0;
-	u_int i, qfirst, qlast;
-	struct netmap_kring **krings;
-	int sync_flags;
 	enum txrx t;
 
 	switch (cmd) {
@@ -3129,70 +3198,8 @@ netmap_ioctl(struct netmap_priv_d *priv, u_long cmd, caddr_t data,
 
 	case NIOCTXSYNC:
 	case NIOCRXSYNC: {
-		if (unlikely(priv->np_nifp == NULL)) {
-			error = ENXIO;
-			break;
-		}
-		mb(); /* make sure following reads are not from cache */
-
-		if (unlikely(priv->np_csb_atok_base)) {
-			nm_prerr("Invalid sync in CSB mode");
-			error = EBUSY;
-			break;
-		}
-
-		na = priv->np_na;      /* we have a reference */
-
-		mbq_init(&q);
-		t = (cmd == NIOCTXSYNC ? NR_TX : NR_RX);
-		krings = NMR(na, t);
-		qfirst = priv->np_qfirst[t];
-		qlast = priv->np_qlast[t];
-		sync_flags = priv->np_sync_flags;
-
-		for (i = qfirst; i < qlast; i++) {
-			struct netmap_kring *kring = krings[i];
-			struct netmap_ring *ring = kring->ring;
-
-			if (unlikely(nm_kr_tryget(kring, 1, &error))) {
-				error = (error ? EIO : 0);
-				continue;
-			}
-
-			if (cmd == NIOCTXSYNC) {
-				if (netmap_debug & NM_DEBUG_TXSYNC)
-					nm_prinf("pre txsync ring %d cur %d hwcur %d",
-					    i, ring->cur,
-					    kring->nr_hwcur);
-				if (nm_txsync_prologue(kring, ring) >= kring->nkr_num_slots) {
-					netmap_ring_reinit(kring);
-				} else if (kring->nm_sync(kring, sync_flags | NAF_FORCE_RECLAIM) == 0) {
-					nm_sync_finalize(kring);
-				}
-				if (netmap_debug & NM_DEBUG_TXSYNC)
-					nm_prinf("post txsync ring %d cur %d hwcur %d",
-					    i, ring->cur,
-					    kring->nr_hwcur);
-			} else {
-				if (nm_rxsync_prologue(kring, ring) >= kring->nkr_num_slots) {
-					netmap_ring_reinit(kring);
-				}
-				if (nm_may_forward_up(kring)) {
-					/* transparent forwarding, see netmap_poll() */
-					netmap_grab_packets(kring, &q, netmap_fwd);
-				}
-				if (kring->nm_sync(kring, sync_flags | NAF_FORCE_READ) == 0) {
-					nm_sync_finalize(kring);
-				}
-				ring_timestamp_set(ring);
-			}
-			nm_kr_put(kring);
-		}
-
-		if (mbq_peek(&q)) {
-			netmap_send_up(na->ifp, &q);
-		}
-
+		na = priv->np_na;
+		error = na->nm_ioctl_rxtx_sync(priv, cmd);
 		break;
 	}
 
@@ -4191,6 +4198,8 @@ netmap_attach_common(struct netmap_adapter *na)
 
 	if (na->nm_poll == NULL)
 		na->nm_poll = netmap_poll;
+	if (na->nm_ioctl_rxtx_sync == NULL)
+		na->nm_ioctl_rxtx_sync = netmap_ioctl_rxtx_sync;
 
 #ifdef WITH_VALE
 	if (na->nm_bdg_attach == NULL)
