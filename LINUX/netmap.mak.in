@@ -118,7 +118,7 @@ clean-apps: $(APPS_LIST:%=clean-app-%)
 .PHONY: apps $(APPS_BUILD) install-apps $(APPS_INSTALL)
 define apps_actions
 build-app-$(1): libnetmap
-	+$(MAKE) -C build-apps/$(1) SRCDIR=$(SRCDIR)/.. BUILDDIR=$(BUILDDIR) CC="$(APPS_CC)" LD="$(APPS_LD)"
+	+$(MAKE) -C build-apps/$(1) SRCDIR=$(SRCDIR)/.. BUILDDIR=$(BUILDDIR) CC="$(APPS_CC)" LD="$(APPS_LD)" SUBSYS_FLAGS="$(SUBSYS_FLAGS)"
 
 install-app-$(1):
 	$(MAKE) -C build-apps/$(1) install SRCDIR=$(SRCDIR)/.. BUILDDIR=$(BUILDDIR) DESTDIR="$(abspath $(DESTDIR))" PREFIX="$(PREFIX)"
@@ -132,7 +132,7 @@ $(foreach a,$(APPS_LIST),$(eval $(call apps_actions,$(a))))
 	@echo '$($*)'
 
 libnetmap:
-	+$(MAKE) -C build-libnetmap SRCDIR=$(SRCDIR)/.. BUILDDIR=$(BUILDDIR) CC="$(APPS_CC)" LD="$(APPS_LD)"
+	+$(MAKE) -C build-libnetmap SRCDIR=$(SRCDIR)/.. BUILDDIR=$(BUILDDIR) CC="$(APPS_CC)" LD="$(APPS_LD)" SUBSYS_FLAGS="$(SUBSYS_FLAGS)"
 
 clean-libnetmap:
 	+$(MAKE) -C build-libnetmap clean SRCDIR=$(SRCDIR)/.. BUILDDIR=$(BUILDDIR)

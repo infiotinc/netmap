@@ -13,6 +13,7 @@ CFLAGS = -O2 -pipe
 CFLAGS += -Werror -Wall -Wunused-function
 CFLAGS += -I $(SRCDIR)/sys -I $(SRCDIR)/apps/include -I $(SRCDIR)/libnetmap
 CFLAGS += -Wextra
+CFLAGS += $(SUBSYS_FLAGS)
 
 LDFLAGS += -L $(BUILDDIR)/build-libnetmap
 LDLIBS += -lnetmap -lpthread -lm

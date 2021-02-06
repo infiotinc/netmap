@@ -535,13 +535,30 @@ int
 nmport_parse(struct nmport_d *d, const char *ifname)
 {
 	const char *scan = ifname;
+	uint16_t subsys_type;
 
-	if (nmreq_header_decode(&scan, &d->hdr, d->ctx) < 0) {
+	if (nmreq_header_decode(&scan, &subsys_type, &d->hdr, d->ctx) < 0) {
 		goto err;
 	}
 
 	/* parse the register request */
-	if (nmreq_register_decode(&scan, &d->reg, d->ctx) < 0) {
+	switch (subsys_type) {
+	case NETMAP_SUB_TYPE:
+	case VALE_SUB_TYPE:
+		if (nmreq_register_decode(&scan, &d->reg, d->ctx) < 0) {
+			goto err;
+		}
+		break;
+
+#ifdef CONFIG_NETMAP_DSA
+	case DSA_SUB_TYPE:
+		if (nmreq_register_decode_dsa(&scan, &d->reg, d->ctx) < 0) {
+			goto err;
+		}
+		break;
+#endif
+
+	default:
 		goto err;
 	}
 
@@ -573,6 +590,16 @@ nmport_prepare(const char *ifname)
 	d = nmport_new();
 	if (d == NULL)
 		goto err;
+
+#if CONFIG_NETMAP_DSA
+	char dsa_ifname[NETMAP_REQ_IFNAMSIZ];
+	if (!strncmp(ifname, DSA_IF_PREFIX, strlen(DSA_IF_PREFIX))) {
+		if (!nmdsa_find_port_cfg(d, ifname, dsa_ifname,
+					 NETMAP_REQ_IFNAMSIZ))
+			return NULL;
+		ifname = dsa_ifname;
+	}
+#endif
 
 	/* parse the header */
 	if (nmport_parse(d, ifname) < 0)

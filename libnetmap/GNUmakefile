@@ -3,6 +3,7 @@ PREFIX ?= usr/local
 CFLAGS=-O2 -pipe -Wall -Werror
 CFLAGS +=-g
 CFLAGS += -I $(SRCDIR)/sys
+CFLAGS += $(SUBSYS_FLAGS)
 VPATH = $(SRCDIR)/libnetmap
 SRCS=$(notdir $(wildcard $(SRCDIR)/libnetmap/*.c))
 OBJS=$(SRCS:.c=.o)

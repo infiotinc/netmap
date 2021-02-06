@@ -1831,7 +1831,7 @@ nmreq_hdr_parsing(struct TestContext *ctx,
 	orig_hdr = *hdr;
 
 	printf("nmreq_header: \"%s\"\n", ctx->ifparse);
-	if (nmreq_header_decode(&ctx->ifparse, hdr, ctx->nmctx) < 0) {
+	if (nmreq_header_decode(&ctx->ifparse, NULL, hdr, ctx->nmctx) < 0) {
 		if (t->exp_error > 0) {
 			if (errno != t->exp_error) {
 				printf("!!! got errno=%d, want %d\n",
