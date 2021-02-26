@@ -226,6 +226,7 @@ netmap_dsa_reg_port_host(struct netmap_adapter *cpu_na,
 
 	mbq_lock(&host_kring->rx_queue);
 	slave->host_kring = dsa_na->up.rx_rings[DSA_RX_HOST_RING];
+	slave->rx_si = &dsa_na->up.rx_rings[DSA_RX_HOST_RING]->si;
 	slave->port_name = dsa_na->up.name;
 	slave->is_registered = true;
 	cpu_na->dsa_cpu->reg_num_host++;
@@ -844,7 +845,7 @@ netmap_dsa_enqueue_host_pkt(struct netmap_adapter *cpu_na, struct mbuf *m)
 	mbq_unlock(q);
 
 	if (ret)
-		kring->nm_notify(kring, 0);
+		nm_os_selwakeup(&kring->si);
 exit:
 	return ret;
 }

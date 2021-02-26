@@ -4037,6 +4037,8 @@ netmap_dsa_poll(struct netmap_priv_d *priv, int events, NM_SELRECORD_T *sr) {
 	int poll_port_num = dsa_na->port_num;
 	struct netmap_dsa_slave_port_net *slave =
 			&dsa_cpu->slaves_net[poll_port_num];
+	struct netmap_dsa_slave_port_host *slave_host =
+			&dsa_cpu->slaves_host[poll_port_num];
 	int sync_flags = dsa_cpu->np_sync_flags;
 	struct netmap_kring *kring;
 	struct netmap_ring *ring;
@@ -4063,6 +4065,7 @@ netmap_dsa_poll(struct netmap_priv_d *priv, int events, NM_SELRECORD_T *sr) {
 
 	nm_os_selrecord(sr, dsa_cpu->np_si[NR_RX]);
 	nm_os_selrecord(sr, dsa_cpu->np_si[NR_TX]);
+	nm_os_selrecord(sr, slave_host->rx_si);
 	nm_os_selrecord(sr, slave->rx_si);
 
 	poll_cpu_port = dsa_na->bind_mode == NR_REG_SW ? 0 : 1;

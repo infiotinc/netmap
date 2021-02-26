@@ -736,6 +736,7 @@ struct netmap_dsa_slave_port_net {
 };
 
 struct netmap_dsa_slave_port_host {
+	NM_SELINFO_T *rx_si;
 	struct netmap_kring *host_kring;
 	struct netmap_dsa_slave_host_stats stats;
 	char *port_name;
