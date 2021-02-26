@@ -1375,7 +1375,7 @@ netmap_rxsync_from_host_offset(struct netmap_kring *kring, int flags,
 			if (netmap_debug & NM_DEBUG_HOST)
 				nm_prinf("%s", nm_dump_buf(NMB(na, slot),len, 128, NULL));
 
-			slot->len = len;
+			slot->len = len - offset;
 			slot->flags = 0;
 			slot->data_offs = offset;
 			nm_i = nm_next(nm_i, lim);
