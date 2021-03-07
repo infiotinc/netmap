@@ -4063,10 +4063,16 @@ netmap_dsa_poll(struct netmap_priv_d *priv, int events, NM_SELRECORD_T *sr) {
 	want_tx = events & (POLLOUT | POLLWRNORM);
 	want_rx = events & (POLLIN | POLLRDNORM);
 
-	nm_os_selrecord(sr, dsa_cpu->np_si[NR_RX]);
-	nm_os_selrecord(sr, dsa_cpu->np_si[NR_TX]);
-	nm_os_selrecord(sr, slave_host->rx_si);
-	nm_os_selrecord(sr, slave->rx_si);
+	if (dsa_na->bind_mode == NR_REG_ALL_NIC ||
+	    dsa_na->bind_mode == NR_REG_NIC_SW) {
+		nm_os_selrecord(sr, dsa_cpu->np_si[NR_RX]);
+		nm_os_selrecord(sr, &slave->tx_kring->si);
+		nm_os_selrecord(sr, slave->rx_si);
+	}
+
+	if (dsa_na->bind_mode == NR_REG_SW ||
+	    dsa_na->bind_mode == NR_REG_NIC_SW)
+		nm_os_selrecord(sr, slave_host->rx_si);
 
 	poll_cpu_port = dsa_na->bind_mode == NR_REG_SW ? 0 : 1;
 
