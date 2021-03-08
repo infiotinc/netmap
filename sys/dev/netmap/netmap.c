@@ -4205,7 +4205,7 @@ do_rcv:
 			 * We only allow one thread to handle received
 			 * packets on DSA cpu port
 			 */
-			return 0;
+			goto exit;
 		}
 
 		/* Iterate over DSA cpu port rings */
