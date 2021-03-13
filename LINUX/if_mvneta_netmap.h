@@ -36,6 +36,8 @@ char mvneta_driver_name[] = "mvneta" NETMAP_LINUX_DRIVER_SUFFIX;
 
 #define MVNETA_TX_PKT_OFFSET_MASK(offset) (((offset) << 23) & 0x3F800000)
 
+static u32 mvreg_read(struct mvneta_port *pp, u32 offset);
+static void mvreg_write(struct mvneta_port *pp, u32 offset, u32 data);
 static int mvneta_stop(struct net_device *dev);
 static int mvneta_open(struct net_device *dev);
 static void mvneta_rx_desc_fill(struct mvneta_rx_desc *rx_desc,
@@ -277,6 +279,19 @@ static int mvneta_netmap_txsync(struct netmap_kring *kring, int flags)
 		n--;
 	}
 	kring->nr_hwtail = nm_i;
+
+	if (adapter->neta_armada3700) {
+		unsigned long flags;
+		int mask;
+
+		local_irq_save(flags);
+		mask = mvreg_read(adapter, MVNETA_INTR_NEW_MASK);
+		mask |= BIT(ring_nr) & MVNETA_TX_INTR_MASK_ALL;
+		mvreg_write(adapter, MVNETA_INTR_NEW_MASK, mask);
+		local_irq_restore(flags);
+	} else {
+		enable_percpu_irq(adapter->dev->irq, 0);
+	}
 
 	return 0;
 }
